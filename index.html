@@ -43,7 +43,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.06.20.1';
+const APP_VERSION = '26.06.21.1';
 
 /* ============================================================
    CONSTANTS / HELPERS
@@ -311,6 +311,8 @@ function loadSettings() {
     swipeRight: 'paidFull',
     swipeLeft: 'paidPartial',
     maxOccurrencesShown: 12,
+    syncUrl: '',
+    syncKey: '',
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -323,6 +325,70 @@ function loadSettings() {
 
 function saveSettings(s) {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch {}
+}
+
+/* ============================================================
+   SYNC (talks to the self-hosted backend, when configured)
+   ============================================================ */
+
+// Strip a trailing slash so we can reliably append /api/... paths.
+function normalizeSyncUrl(url) {
+  return (url || '').trim().replace(/\/+$/, '');
+}
+
+function syncConfigured(settings) {
+  return !!(normalizeSyncUrl(settings.syncUrl) && settings.syncKey);
+}
+
+async function syncFetch(settings, path, options) {
+  const base = normalizeSyncUrl(settings.syncUrl);
+  const res = await fetch(base + path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-app-key': settings.syncKey,
+      ...(options && options.headers),
+    },
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json()).error || ''; } catch {}
+    throw new Error(detail || `Sync request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+// Quick reachability + auth check, used by the "Test connection" button and
+// before attempting a real sync so failures are diagnosable.
+async function syncTestConnection(settings) {
+  const base = normalizeSyncUrl(settings.syncUrl);
+  if (!base) throw new Error('No server address set.');
+  const healthRes = await fetch(base + '/api/health');
+  if (!healthRes.ok) throw new Error('Server did not respond. Check the address.');
+  // Health check passing only proves the server is reachable, not that the
+  // key is correct — confirm the key separately against a real endpoint.
+  await syncFetch(settings, '/api/bills', { method: 'GET' });
+  return true;
+}
+
+async function syncPullBills(settings) {
+  return syncFetch(settings, '/api/bills', { method: 'GET' });
+}
+
+async function syncPushBills(settings, bills) {
+  return syncFetch(settings, '/api/bills', { method: 'PUT', body: JSON.stringify(bills) });
+}
+
+async function syncPullSettings(settings) {
+  return syncFetch(settings, '/api/settings', { method: 'GET' });
+}
+
+async function syncPushSettings(settings, settingsToPush) {
+  // Never push the connection credentials themselves to the server — only
+  // the app-preference fields, so the key isn't duplicated in the stored
+  // settings blob server-side.
+  const { syncUrl, syncKey, ...rest } = settingsToPush;
+  return syncFetch(settings, '/api/settings', { method: 'PUT', body: JSON.stringify(rest) });
 }
 
 /* ============================================================
@@ -518,10 +584,93 @@ function App() {
   const [toast, setToast] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null); // { bill, scope: 'occurrence' | 'all' }
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | synced | error | offline
+  const [syncError, setSyncError] = useState('');
   const fileInputRef = useRef(null);
+  const hasPulledRef = useRef(false);
+  const skipNextBillsPushRef = useRef(false);
+  const skipNextSettingsPushRef = useRef(false);
 
   useEffect(() => { saveBills(bills); }, [bills]);
   useEffect(() => { saveSettings(settings); }, [settings]);
+
+  // On app open: if a NAS connection is configured, try to pull the latest
+  // bills/settings from it first. If that succeeds, the server's copy wins
+  // (it's the shared source of truth across devices). If it fails for any
+  // reason — NAS asleep, no network, wrong key — fall back silently to
+  // whatever's already cached locally, so the app still opens and works.
+  useEffect(() => {
+    if (!syncConfigured(settings)) return;
+    let cancelled = false;
+    setSyncStatus('syncing');
+    (async () => {
+      try {
+        const [remoteBills, remoteSettings] = await Promise.all([
+          syncPullBills(settings),
+          syncPullSettings(settings),
+        ]);
+        if (cancelled) return;
+        if (Array.isArray(remoteBills) && remoteBills.length > 0) {
+          skipNextBillsPushRef.current = true;
+          setBills(remoteBills);
+        } else {
+          // Server has no bills yet (brand new / first-ever connection) —
+          // push this device's current local bills up immediately, rather
+          // than silently waiting for the next edit to trigger a sync.
+          hasPulledRef.current = true;
+          syncPushBills(settings, bills).catch(() => {});
+        }
+        if (remoteSettings && typeof remoteSettings === 'object') {
+          skipNextSettingsPushRef.current = true;
+          setSettings(prev => ({ ...prev, ...remoteSettings, syncUrl: prev.syncUrl, syncKey: prev.syncKey }));
+        }
+        setSyncStatus('synced');
+        setSyncError('');
+      } catch (err) {
+        if (cancelled) return;
+        setSyncStatus('offline');
+        setSyncError(err.message || 'Could not reach server');
+      } finally {
+        hasPulledRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+    // Only run this on mount / when the connection target changes, not on
+    // every settings change (which would include unrelated preference edits).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.syncUrl, settings.syncKey]);
+
+  // Push bills to the NAS shortly after they change locally, debounced so
+  // rapid edits (e.g. typing an amount) don't fire a request per keystroke.
+  useEffect(() => {
+    if (!syncConfigured(settings)) return;
+    if (!hasPulledRef.current) return; // don't push before the initial pull resolves
+    if (skipNextBillsPushRef.current) { skipNextBillsPushRef.current = false; return; }
+    setSyncStatus('syncing');
+    const timer = setTimeout(() => {
+      syncPushBills(settings, bills)
+        .then(() => { setSyncStatus('synced'); setSyncError(''); })
+        .catch((err) => { setSyncStatus('error'); setSyncError(err.message || 'Sync failed'); });
+    }, 900);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bills]);
+
+  // Same debounced push for settings (preferences only — credentials are
+  // stripped out inside syncPushSettings before the request is sent).
+  useEffect(() => {
+    if (!syncConfigured(settings)) return;
+    if (!hasPulledRef.current) return;
+    if (skipNextSettingsPushRef.current) { skipNextSettingsPushRef.current = false; return; }
+    const timer = setTimeout(() => {
+      syncPushSettings(settings, settings).catch(() => {
+        // Settings sync failures are quieter than bills failures — the
+        // bills push effect already surfaces connectivity problems.
+      });
+    }, 900);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
 
   // Auto-pay sweep: runs once when the app opens. Any entry (bill or income)
   // flagged autoPay whose due date has arrived and isn't already marked
@@ -776,7 +925,7 @@ function App() {
         .modal-anim { animation: fadeIn 0.15s ease-out; }
       `}</style>
 
-      <Header colors={colors} view={view} setView={setView} onSettings={() => setShowSettings(true)} onAdd={() => setShowAddEdit('new')} />
+      <Header colors={colors} view={view} setView={setView} onSettings={() => setShowSettings(true)} onAdd={() => setShowAddEdit('new')} syncStatus={syncStatus} />
       {view !== 'history' && (
         <PeriodBar colors={colors} settings={settings} period={period} periodOffset={periodOffset} setPeriodOffset={setPeriodOffset} totals={periodTotals} />
       )}
@@ -816,6 +965,8 @@ function App() {
           onImportClick={() => fileInputRef.current && fileInputRef.current.click()}
           onGoogleDrive={handleGoogleDriveConnect}
           onClearAll={() => setConfirmClearAll(true)}
+          syncStatus={syncStatus}
+          syncError={syncError}
         />
       )}
 
@@ -1146,7 +1297,7 @@ function UploadIcon(props) {
   );
 }
 
-function Header({ colors, view, setView, onSettings, onAdd }) {
+function Header({ colors, view, setView, onSettings, onAdd, syncStatus }) {
   const [viewPickerOpen, setViewPickerOpen] = useState(false);
   const VIEW_OPTIONS = [
     { key: 'list', label: 'List', Icon: ListIcon },
@@ -1214,8 +1365,15 @@ function Header({ colors, view, setView, onSettings, onAdd }) {
             <PlusIcon />
           </button>
 
-          <button onClick={onSettings} aria-label="Settings" title="Settings" style={{ border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, borderRadius: 10, width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <button onClick={onSettings} aria-label="Settings" title={syncStatus === 'synced' ? 'Settings — synced' : syncStatus === 'syncing' ? 'Settings — syncing' : syncStatus === 'offline' ? 'Settings — offline, using local data' : syncStatus === 'error' ? 'Settings — sync error' : 'Settings'} style={{ position: 'relative', border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, borderRadius: 10, width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
             <GearIcon />
+            {syncStatus && syncStatus !== 'idle' && (
+              <span style={{
+                position: 'absolute', top: 4, right: 4, width: 7, height: 7, borderRadius: '50%',
+                background: syncStatus === 'synced' ? colors.green : syncStatus === 'syncing' ? colors.amber : syncStatus === 'offline' ? colors.textFaint : colors.red,
+                border: `1.5px solid ${colors.bgElevated}`,
+              }} />
+            )}
           </button>
         </div>
       </div>
@@ -2171,7 +2329,107 @@ function ConfirmModal({ colors, title, message, confirmLabel, danger, onCancel, 
    SETTINGS MODAL
    ============================================================ */
 
-function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, onExportJSON, onImportClick, onGoogleDrive, onClearAll }) {
+function SyncSection({ colors, settings, update, syncStatus, syncError }) {
+  const [urlDraft, setUrlDraft] = useState(settings.syncUrl);
+  const [keyDraft, setKeyDraft] = useState(settings.syncKey);
+  const [testState, setTestState] = useState('idle'); // idle | testing | ok | fail
+  const [testMessage, setTestMessage] = useState('');
+
+  const isConfigured = syncConfigured(settings);
+
+  async function handleSaveConnection() {
+    setTestState('testing');
+    setTestMessage('');
+    const trial = { ...settings, syncUrl: urlDraft, syncKey: keyDraft };
+    try {
+      await syncTestConnection(trial);
+      setTestState('ok');
+      update({ syncUrl: urlDraft.trim(), syncKey: keyDraft });
+    } catch (err) {
+      setTestState('fail');
+      setTestMessage(err.message || 'Could not connect.');
+    }
+  }
+
+  function handleDisconnect() {
+    update({ syncUrl: '', syncKey: '' });
+    setUrlDraft('');
+    setKeyDraft('');
+    setTestState('idle');
+    setTestMessage('');
+  }
+
+  const statusBadge = (() => {
+    if (!isConfigured) return null;
+    if (syncStatus === 'syncing') return { label: 'Syncing…', color: colors.amber };
+    if (syncStatus === 'synced') return { label: 'Synced', color: colors.green };
+    if (syncStatus === 'offline') return { label: 'Offline — using local data', color: colors.textMuted };
+    if (syncStatus === 'error') return { label: 'Sync error', color: colors.red };
+    return null;
+  })();
+
+  return (
+    <Section colors={colors} title="Sync across devices">
+      {isConfigured ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 10, border: `1px solid ${colors.border}`, background: colors.bgInput }}>
+            <CloudIcon size={15} style={{ color: colors.textMuted, flexShrink: 0 }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{settings.syncUrl}</div>
+              {statusBadge && <div style={{ fontSize: 11.5, color: statusBadge.color, marginTop: 1 }}>{statusBadge.label}</div>}
+            </div>
+          </div>
+          {syncStatus === 'error' && syncError && (
+            <div style={{ fontSize: 11.5, color: colors.red }}>{syncError}</div>
+          )}
+          <button style={{ ...secondaryButtonStyle(colors), color: colors.red, borderColor: colors.red }} onClick={handleDisconnect}>
+            Disconnect
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 11.5, color: colors.textFaint, lineHeight: 1.5 }}>
+            Connect to your self-hosted server to keep bills in sync across your phone and PC. Without this, bills stay local to this device only.
+          </div>
+          <div>
+            <FieldLabel colors={colors}>Server address</FieldLabel>
+            <input
+              style={inputStyle(colors)}
+              value={urlDraft}
+              onChange={e => setUrlDraft(e.target.value)}
+              placeholder="http://100.x.x.x:3001"
+            />
+          </div>
+          <div>
+            <FieldLabel colors={colors}>App key</FieldLabel>
+            <input
+              style={inputStyle(colors)}
+              type="password"
+              value={keyDraft}
+              onChange={e => setKeyDraft(e.target.value)}
+              placeholder="The key set on your server"
+            />
+          </div>
+          {testState === 'fail' && (
+            <div style={{ fontSize: 11.5, color: colors.red }}>{testMessage}</div>
+          )}
+          {testState === 'ok' && (
+            <div style={{ fontSize: 11.5, color: colors.green }}>Connected.</div>
+          )}
+          <button
+            style={primaryButtonStyle(colors)}
+            onClick={handleSaveConnection}
+            disabled={!urlDraft.trim() || !keyDraft || testState === 'testing'}
+          >
+            {testState === 'testing' ? 'Connecting…' : 'Connect'}
+          </button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, onExportJSON, onImportClick, onGoogleDrive, onClearAll, syncStatus, syncError }) {
   function update(patch) {
     setSettings(s => ({ ...s, ...patch }));
   }
@@ -2179,6 +2437,8 @@ function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, on
   return (
     <ModalShell colors={colors} onClose={onClose} title="Settings">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+
+        <SyncSection colors={colors} settings={settings} update={update} syncStatus={syncStatus} syncError={syncError} />
 
         <Section colors={colors} title="Appearance">
           <div style={{ display: 'flex', gap: 8 }}>
