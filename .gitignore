@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Real compose file with your actual APP_KEY — copy docker-compose.example.yml
+# to docker-compose.yml locally/on the NAS and fill in your real key there.
+# Never commit the real one.
+backend/docker-compose.yml
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/

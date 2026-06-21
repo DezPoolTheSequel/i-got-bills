@@ -1,0 +1,12 @@
+{
+  "name": "i-got-bills-backend",
+  "version": "1.0.0",
+  "description": "Minimal storage API for the I Got Bills app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
