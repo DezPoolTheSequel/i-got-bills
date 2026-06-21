@@ -12,3 +12,6 @@ Thumbs.db
 
 # Editor
 .vscode/
+
+# Local backend testing data (created by following README.md local dev instructions)
+backend/local-data/

@@ -43,7 +43,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.06.21.2';
+const APP_VERSION = '26.06.21.3';
 
 /* ============================================================
    CONSTANTS / HELPERS
@@ -55,7 +55,7 @@ const SETTINGS_KEY = 'billsTrackerSettings_v3';
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-const DEFAULT_CATEGORIES = ['Housing', 'Utilities', 'Subscriptions', 'Insurance', 'Credit Card', 'Debt', 'Other'];
+const DEFAULT_CATEGORIES = ['Housing', 'Utilities', 'Food', 'Subscriptions', 'Insurance', 'Credit Card', 'Debt', 'Other'];
 const INCOME_CATEGORIES = ['Paycheck', 'Freelance', 'Gift', 'Refund', 'Other income'];
 
 const ACTION_LABELS = {
@@ -2565,13 +2565,18 @@ function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, on
           </div>
           {settings.periodMode === 'biweekly' && (
             <div>
-              <FieldLabel colors={colors}>Pay day (period starts on this weekday)</FieldLabel>
-              <select style={inputStyle(colors)} value={settings.biweeklyAnchorDay} onChange={e => {
-                const day = parseInt(e.target.value);
-                update({ biweeklyAnchorDay: day, biweeklyAnchorDate: nextAnchorOnOrAfter(todayISO(), day) });
-              }}>
-                {DAY_NAMES.map((d, i) => <option key={i} value={i}>{d}</option>)}
-              </select>
+              <FieldLabel colors={colors}>First period start date</FieldLabel>
+              <input
+                style={inputStyle(colors)}
+                type="date"
+                value={settings.biweeklyAnchorDate}
+                onChange={e => {
+                  const date = e.target.value;
+                  if (!date) return;
+                  const day = parseISO(date).getDay();
+                  update({ biweeklyAnchorDate: date, biweeklyAnchorDay: day });
+                }}
+              />
               <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 6 }}>
                 Each period runs {DAY_NAMES[settings.biweeklyAnchorDay]} through the {DAY_NAMES[(settings.biweeklyAnchorDay + 6) % 7]} two weeks later.
               </div>
