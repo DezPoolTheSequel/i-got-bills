@@ -1,0 +1,2348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#BA7517" />
+<title>I Got Bills</title>
+
+<!-- PWA / installability -->
+<link rel="manifest" href="manifest.json" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="I Got Bills" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #FAF8F2; }
+  #root { min-height: 100vh; }
+  #boot-error { display: none; max-width: 600px; margin: 60px auto; padding: 20px; font-family: -apple-system, sans-serif; color: #A32D2D; white-space: pre-wrap; }
+</style>
+
+<!-- React + ReactDOM (production builds) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Babel standalone: lets the browser compile the JSX below at load time, no build step needed -->
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useRef } = React;
+
+
+/* ============================================================
+   APP IDENTITY
+   ============================================================ */
+
+// Version format: YY.MM.DD.N — N is a same-day build counter, reset to 1
+// whenever the date changes, incremented whenever this file is republished
+// again on the same day.
+const APP_NAME = 'I Got Bills';
+const APP_VERSION = '26.06.20.1';
+
+/* ============================================================
+   CONSTANTS / HELPERS
+   ============================================================ */
+
+const STORAGE_KEY = 'billsTrackerData_v3';
+const SETTINGS_KEY = 'billsTrackerSettings_v3';
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+const DEFAULT_CATEGORIES = ['Housing', 'Utilities', 'Subscriptions', 'Insurance', 'Debt', 'Other'];
+const INCOME_CATEGORIES = ['Paycheck', 'Freelance', 'Gift', 'Refund', 'Other income'];
+
+const ACTION_LABELS = {
+  paidFull: 'Mark paid in full',
+  paidPartial: 'Log partial payment',
+  editBudget: 'Edit budget amount',
+  none: 'No action',
+};
+
+const ACTION_COLORS = {
+  paidFull: '#1D9E75',
+  paidPartial: '#378ADD',
+  editBudget: '#BA7517',
+  none: '#888780',
+};
+
+const ACTION_ICON_COMPONENTS = {
+  paidFull: CheckIcon,
+  paidPartial: CoinIcon,
+  editBudget: EditIcon,
+  none: CloseIcon,
+};
+
+const ACTION_SHORT_LABELS = {
+  paidFull: 'Paid',
+  paidPartial: 'Partial',
+  editBudget: 'Edit',
+  none: '',
+};
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
+}
+
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function parseISO(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function toISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function formatMoney(n) {
+  return (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+}
+
+function formatDateShort(iso) {
+  const d = parseISO(iso);
+  return `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+}
+
+function formatDateWithYear(iso) {
+  const d = parseISO(iso);
+  return `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
+function daysUntil(iso) {
+  const today = parseISO(todayISO());
+  const due = parseISO(iso);
+  return Math.round((due.getTime() - today.getTime()) / 86400000);
+}
+
+// Single source of truth for "is this bill paid" — derived from the actual
+// amounts rather than trusting a stored flag, so it can't drift out of sync
+// after edits to budget or paid amount.
+function isBillPaid(bill) {
+  return bill.budgetAmount > 0 && bill.paidAmount >= bill.budgetAmount;
+}
+
+function addDays(iso, days) {
+  const d = parseISO(iso);
+  d.setDate(d.getDate() + days);
+  return toISO(d);
+}
+
+function getBiweeklyPeriod(targetISO, anchorDate) {
+  const anchor = parseISO(anchorDate);
+  const target = parseISO(targetISO);
+  const diffDays = Math.floor((target.getTime() - anchor.getTime()) / 86400000);
+  const periodIndex = Math.floor(diffDays / 14);
+  const start = new Date(anchor);
+  start.setDate(start.getDate() + periodIndex * 14);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 13);
+  return { start: toISO(start), end: toISO(end) };
+}
+
+function nextAnchorOnOrAfter(fromISO, weekday) {
+  const d = parseISO(fromISO);
+  const diff = (weekday - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + diff);
+  return toISO(d);
+}
+
+/* ============================================================
+   RECURRENCE ENGINE
+   ============================================================ */
+
+const FREQUENCIES = ['weekly', 'biweekly', 'monthly', 'annual'];
+
+const FREQUENCY_LABELS = {
+  weekly: 'Weekly',
+  biweekly: 'Bi-weekly',
+  monthly: 'Monthly',
+  annual: 'Annual',
+};
+
+// How many occurrences (including the first) to materialize into storage at
+// a time for a "forever" series. Regenerated/extended as the window is consumed.
+const FOREVER_GENERATION_WINDOW = 24;
+
+function advanceDateByFrequency(iso, frequency, steps) {
+  const d = parseISO(iso);
+  if (frequency === 'weekly') {
+    d.setDate(d.getDate() + 7 * steps);
+    return toISO(d);
+  }
+  if (frequency === 'biweekly') {
+    d.setDate(d.getDate() + 14 * steps);
+    return toISO(d);
+  }
+  if (frequency === 'monthly') {
+    const targetMonthIndex = d.getMonth() + steps;
+    const targetYear = d.getFullYear() + Math.floor(targetMonthIndex / 12);
+    const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
+    const lastDayOfTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+    const clampedDay = Math.min(d.getDate(), lastDayOfTargetMonth);
+    return toISO(new Date(targetYear, targetMonth, clampedDay));
+  }
+  if (frequency === 'annual') {
+    const targetYear = d.getFullYear() + steps;
+    // Clamp Feb 29 -> Feb 28 on non-leap target years.
+    const lastDayOfTargetMonth = new Date(targetYear, d.getMonth() + 1, 0).getDate();
+    const clampedDay = Math.min(d.getDate(), lastDayOfTargetMonth);
+    return toISO(new Date(targetYear, d.getMonth(), clampedDay));
+  }
+  return toISO(d);
+}
+
+// Given a series template (the shared fields) and how many occurrences to
+// produce starting at occurrence index `startIndex` (0-based, relative to
+// the series' original start date), return that many new Bill records.
+function generateOccurrences(template, startIndex, count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const occurrenceIndex = startIndex + i;
+    const dueDate = advanceDateByFrequency(template.seriesStartDate, template.frequency, occurrenceIndex);
+    out.push({
+      id: uid(),
+      type: template.type || 'bill', // 'bill' | 'income'
+      seriesId: template.seriesId,
+      occurrenceIndex,
+      name: template.name,
+      category: template.category,
+      budgetAmount: template.budgetAmount,
+      paidAmount: 0,
+      dueDate,
+      isPaid: false,
+      notes: template.notes,
+      recurring: true,
+      autoPay: template.autoPay || false,
+      frequency: template.frequency,
+      seriesStartDate: template.seriesStartDate,
+      endType: template.endType, // 'forever' | 'count'
+      occurrenceLimit: template.occurrenceLimit, // null if forever
+    });
+  }
+  return out;
+}
+
+// How many occurrences should exist for a bounded ('count') series.
+function totalOccurrencesFor(template) {
+  if (template.endType === 'forever') return Infinity;
+  return Math.max(1, template.occurrenceLimit || 1);
+}
+
+/* ============================================================
+   STORAGE
+   ============================================================ */
+
+function seedDemoData() {
+  const today = todayISO();
+  const rentSeriesId = uid();
+  const rentTemplate = {
+    type: 'bill',
+    seriesId: rentSeriesId,
+    name: 'Rent',
+    category: 'Housing',
+    budgetAmount: 1450,
+    notes: '',
+    frequency: 'monthly',
+    seriesStartDate: addDays(today, 3),
+    endType: 'forever',
+    occurrenceLimit: null,
+    autoPay: false,
+  };
+  const rentOccurrences = generateOccurrences(rentTemplate, 0, 6);
+
+  const paycheckSeriesId = uid();
+  const paycheckTemplate = {
+    type: 'income',
+    seriesId: paycheckSeriesId,
+    name: 'Paycheck',
+    category: 'Paycheck',
+    budgetAmount: 1800,
+    notes: '',
+    frequency: 'biweekly',
+    seriesStartDate: nextAnchorOnOrAfter(today, 5),
+    endType: 'forever',
+    occurrenceLimit: null,
+    autoPay: true,
+  };
+  const paycheckOccurrences = generateOccurrences(paycheckTemplate, 0, 6);
+
+  return [
+    ...rentOccurrences,
+    ...paycheckOccurrences,
+    { id: uid(), type: 'bill', name: 'Power Company', category: 'Utilities', budgetAmount: 145, paidAmount: 0, dueDate: addDays(today, 6), isPaid: false, notes: '', recurring: false, autoPay: false },
+    { id: uid(), type: 'bill', name: 'Internet', category: 'Utilities', budgetAmount: 80, paidAmount: 0, dueDate: addDays(today, 10), isPaid: false, notes: '', recurring: false, autoPay: true },
+    { id: uid(), type: 'bill', name: 'Spotify', category: 'Subscriptions', budgetAmount: 11.99, paidAmount: 11.99, dueDate: addDays(today, -2), isPaid: true, notes: '', recurring: false, autoPay: true },
+    { id: uid(), type: 'bill', name: 'Car Insurance', category: 'Insurance', budgetAmount: 132, paidAmount: 0, dueDate: addDays(today, 14), isPaid: false, notes: '', recurring: false, autoPay: false },
+  ];
+}
+
+function loadBills() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return seedDemoData();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    return seedDemoData();
+  } catch {
+    return seedDemoData();
+  }
+}
+
+function saveBills(bills) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bills)); } catch {}
+}
+
+function loadSettings() {
+  const defaults = {
+    theme: 'light',
+    periodMode: 'monthly',
+    biweeklyAnchorDay: 5,
+    biweeklyAnchorDate: nextAnchorOnOrAfter(todayISO(), 5),
+    swipeRight: 'paidFull',
+    swipeLeft: 'paidPartial',
+    maxOccurrencesShown: 12,
+  };
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return defaults;
+    return { ...defaults, ...JSON.parse(raw) };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveSettings(s) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch {}
+}
+
+/* ============================================================
+   CSV / IMPORT-EXPORT
+   ============================================================ */
+
+const CSV_COLUMNS = ['type', 'name', 'category', 'budgetAmount', 'paidAmount', 'dueDate', 'isPaid', 'notes', 'recurring', 'autoPay', 'seriesId', 'occurrenceIndex', 'frequency', 'seriesStartDate', 'endType', 'occurrenceLimit'];
+
+// For "forever" series, exporting every generated future occurrence is both
+// wasteful and fragile (the cache window is just an implementation detail,
+// not real data). Instead, keep every real record — anything paid, or due
+// in the past — in full, and collapse the future/unpaid tail of each
+// forever series down to a single placeholder row. The importer recognizes
+// that placeholder (isSeriesPlaceholder) and regenerates the forward window
+// from it, the same way the app does internally.
+function collapseForExport(bills) {
+  const today = todayISO();
+  const bySeriesForever = new Map();
+
+  for (const b of bills) {
+    if (b.seriesId && b.endType === 'forever') {
+      const isFutureUnpaid = !isBillPaid(b) && b.dueDate >= today;
+      if (isFutureUnpaid) {
+        const existing = bySeriesForever.get(b.seriesId);
+        if (!existing || b.dueDate < existing.dueDate) bySeriesForever.set(b.seriesId, b);
+        continue; // skip adding this row directly — handled below
+      }
+    }
+  }
+
+  const kept = bills.filter(b => {
+    if (b.seriesId && b.endType === 'forever') {
+      const isFutureUnpaid = !isBillPaid(b) && b.dueDate >= today;
+      return !isFutureUnpaid; // drop all future/unpaid forever rows except the placeholder we'll add back
+    }
+    return true;
+  });
+
+  const placeholders = Array.from(bySeriesForever.values()).map(b => ({ ...b, isSeriesPlaceholder: true }));
+
+  return [...kept, ...placeholders];
+}
+
+// After import, any row flagged isSeriesPlaceholder represents "regenerate
+// this forever series starting here" — expand it back into a real occurrence
+// plus the same rolling window the app normally keeps materialized.
+function expandAfterImport(bills) {
+  const out = [];
+  for (const b of bills) {
+    if (b.isSeriesPlaceholder && b.seriesId && b.frequency && b.seriesStartDate) {
+      const template = {
+        type: b.type || 'bill',
+        seriesId: b.seriesId,
+        name: b.name,
+        category: b.category,
+        budgetAmount: b.budgetAmount,
+        notes: b.notes,
+        frequency: b.frequency,
+        seriesStartDate: b.seriesStartDate,
+        endType: b.endType,
+        occurrenceLimit: b.occurrenceLimit,
+        autoPay: b.autoPay || false,
+      };
+      const startIndex = b.occurrenceIndex != null ? b.occurrenceIndex : 0;
+      const regenerated = generateOccurrences(template, startIndex, FOREVER_GENERATION_WINDOW);
+      out.push(...regenerated);
+    } else {
+      const { isSeriesPlaceholder, ...rest } = b;
+      out.push(rest);
+    }
+  }
+  return out;
+}
+
+function billsToCSV(bills) {
+  const header = [...CSV_COLUMNS, 'isSeriesPlaceholder'].join(',');
+  const rows = bills.map(b => [...CSV_COLUMNS, 'isSeriesPlaceholder'].map(col => {
+    const v = b[col];
+    if (v === undefined || v === null) return '';
+    const s = typeof v === 'string' ? v.replace(/"/g, '""') : String(v);
+    return /[",\n]/.test(s) ? `"${s}"` : s;
+  }).join(','));
+  return [header, ...rows].join('\n');
+}
+
+function parseCSVLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; }
+      } else { cur += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function csvToBills(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) return [];
+  const header = parseCSVLine(lines[0]).map(h => h.trim());
+  const bills = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCSVLine(lines[i]);
+    const row = {};
+    header.forEach((h, idx) => { row[h] = cells[idx]; });
+    bills.push({
+      id: uid(),
+      type: row.type === 'income' ? 'income' : 'bill',
+      name: row.name || 'Untitled',
+      category: row.category || 'Other',
+      budgetAmount: parseFloat(row.budgetAmount) || 0,
+      paidAmount: parseFloat(row.paidAmount) || 0,
+      dueDate: row.dueDate || todayISO(),
+      isPaid: String(row.isPaid).toLowerCase() === 'true',
+      notes: row.notes || '',
+      recurring: String(row.recurring).toLowerCase() === 'true',
+      autoPay: String(row.autoPay).toLowerCase() === 'true',
+      seriesId: row.seriesId || null,
+      occurrenceIndex: row.occurrenceIndex !== undefined && row.occurrenceIndex !== '' ? parseInt(row.occurrenceIndex) : null,
+      frequency: row.frequency || null,
+      seriesStartDate: row.seriesStartDate || null,
+      endType: row.endType || null,
+      occurrenceLimit: row.occurrenceLimit !== undefined && row.occurrenceLimit !== '' ? parseInt(row.occurrenceLimit) : null,
+      isSeriesPlaceholder: String(row.isSeriesPlaceholder).toLowerCase() === 'true',
+    });
+  }
+  return bills;
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/* ============================================================
+   THEME TOKENS
+   ============================================================ */
+
+function themeVars(theme) {
+  if (theme === 'dark') {
+    return {
+      bg: '#15140F', bgElevated: '#1E1C16', bgInput: '#252319',
+      border: '#3A3729', borderSoft: '#2A2820',
+      text: '#F2EFE4', textMuted: '#A6A296', textFaint: '#716D60',
+      accent: '#EF9F27', accentText: '#412402',
+      green: '#5DCAA5', greenText: '#04342C', greenBg: '#0F2C24',
+      amber: '#FAC775', amberBg: '#3A2A0C',
+      red: '#F09595', redBg: '#3A1414',
+      blue: '#85B7EB', blueText: '#042C53', blueBg: '#0F2233',
+    };
+  }
+  return {
+    bg: '#FAF8F2', bgElevated: '#FFFFFF', bgInput: '#FFFFFF',
+    border: '#E4E0D2', borderSoft: '#EDEAE0',
+    text: '#2C2C2A', textMuted: '#716D60', textFaint: '#A6A296',
+    accent: '#BA7517', accentText: '#412402',
+    green: '#0F6E56', greenText: '#04342C', greenBg: '#E1F5EE',
+    amber: '#854F0B', amberBg: '#FAEEDA',
+    red: '#A32D2D', redBg: '#FCEBEB',
+    blue: '#185FA5', blueText: '#042C53', blueBg: '#E6F1FB',
+  };
+}
+
+/* ============================================================
+   ROOT APP
+   ============================================================ */
+
+function App() {
+  const [bills, setBills] = useState(() => loadBills());
+  const [settings, setSettings] = useState(() => loadSettings());
+  const [view, setView] = useState('list');
+  const [showSettings, setShowSettings] = useState(false);
+  const [showAddEdit, setShowAddEdit] = useState(null);
+  const [partialPaymentBill, setPartialPaymentBill] = useState(null);
+  const [editBudgetBill, setEditBudgetBill] = useState(null);
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const [toast, setToast] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null); // { bill, scope: 'occurrence' | 'all' }
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => { saveBills(bills); }, [bills]);
+  useEffect(() => { saveSettings(settings); }, [settings]);
+
+  // Auto-pay sweep: runs once when the app opens. Any entry (bill or income)
+  // flagged autoPay whose due date has arrived and isn't already marked
+  // paid/received gets marked in full automatically, same as a manual swipe.
+  useEffect(() => {
+    const today = todayISO();
+    setBills(prev => {
+      let changed = false;
+      const next = prev.map(b => {
+        if (b.autoPay && !isBillPaid(b) && b.dueDate <= today) {
+          changed = true;
+          return { ...b, paidAmount: b.budgetAmount, isPaid: true };
+        }
+        return b;
+      });
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const colors = useMemo(() => themeVars(settings.theme), [settings.theme]);
+
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2200);
+  }
+
+  function upsertBill(bill) {
+    setBills(prev => {
+      const exists = prev.some(b => b.id === bill.id);
+      if (exists) return prev.map(b => (b.id === bill.id ? bill : b));
+      return [...prev, bill];
+    });
+  }
+
+  function deleteBill(id) {
+    setBills(prev => prev.filter(b => b.id !== id));
+    showToast('Bill deleted');
+  }
+
+  // Saves edits to just the one occurrence the person selected. If it was
+  // part of a series, it's detached so future series-wide edits won't
+  // overwrite it again.
+  function saveOccurrenceOnly(updated) {
+    upsertBill({ ...updated, seriesId: null, frequency: null, seriesStartDate: null, endType: null, occurrenceLimit: null, occurrenceIndex: null });
+    showToast('This occurrence updated');
+  }
+
+  // Saves edits to this occurrence and propagates them to every UNPAID
+  // sibling in the series, past or future, then regenerates the forward
+  // window using the new rule. Paid occurrences (real payment history) are
+  // always left untouched.
+  function saveAllInSeries(updated, originalBill) {
+    const seriesId = originalBill.seriesId || uid();
+    setBills(prev => {
+      const startIndex = originalBill.occurrenceIndex != null ? originalBill.occurrenceIndex : 0;
+
+      // Recompute the series anchor date so it's consistent with the
+      // person's edited due date for THIS occurrence — otherwise later
+      // occurrences in the regenerated window would drift back to the old
+      // cadence instead of continuing from the corrected date.
+      const recomputedSeriesStart = advanceDateByFrequency(updated.dueDate, updated.frequency, -startIndex);
+
+      const newTemplate = {
+        type: updated.type || 'bill',
+        seriesId,
+        name: updated.name,
+        category: updated.category,
+        budgetAmount: updated.budgetAmount,
+        notes: updated.notes,
+        frequency: updated.frequency,
+        seriesStartDate: recomputedSeriesStart,
+        endType: updated.endType,
+        occurrenceLimit: updated.occurrenceLimit,
+        autoPay: updated.autoPay || false,
+      };
+
+      // Keep every bill NOT in this series untouched, plus any sibling that
+      // IS paid (preserve their own dates/amounts as payment history).
+      const kept = prev.filter(b => b.seriesId !== seriesId || isBillPaid(b));
+
+      const totalAllowed = totalOccurrencesFor(newTemplate);
+      const remainingSlots = totalAllowed === Infinity
+        ? FOREVER_GENERATION_WINDOW
+        : Math.max(0, totalAllowed - startIndex);
+
+      const regenerated = generateOccurrences(newTemplate, startIndex, Math.min(remainingSlots, FOREVER_GENERATION_WINDOW));
+
+      return [...kept, ...regenerated];
+    });
+    showToast('This and all future occurrences updated');
+  }
+
+  // Deletes just the one occurrence the person selected.
+  function deleteOccurrenceOnly(bill) {
+    deleteBill(bill.id);
+  }
+
+  // Deletes this occurrence and every UNPAID sibling in the series, past or
+  // future, and stops generating new ones. Paid siblings are kept as history.
+  function deleteAllInSeries(bill) {
+    const seriesId = bill.seriesId;
+    setBills(prev => prev.filter(b => b.seriesId !== seriesId || isBillPaid(b)));
+    showToast('This and all future occurrences deleted');
+  }
+
+  function markPaidFull(bill) {
+    upsertBill({ ...bill, isPaid: true, paidAmount: bill.budgetAmount });
+    showToast(bill.type === 'income' ? `${bill.name} marked received in full` : `${bill.name} marked paid in full`);
+  }
+
+  function unmarkPaid(bill) {
+    upsertBill({ ...bill, isPaid: false, paidAmount: 0 });
+    showToast(bill.type === 'income' ? `${bill.name} moved back to not received` : `${bill.name} moved back to unpaid`);
+  }
+
+  function applyPartialPayment(bill, amount) {
+    const newPaid = bill.paidAmount + amount;
+    upsertBill({ ...bill, paidAmount: newPaid, isPaid: newPaid >= bill.budgetAmount });
+    showToast(bill.type === 'income' ? `Logged ${formatMoney(amount)} received from ${bill.name}` : `Logged ${formatMoney(amount)} toward ${bill.name}`);
+  }
+
+  function applyBudgetEdit(bill, amount) {
+    upsertBill({ ...bill, budgetAmount: amount, isPaid: bill.paidAmount >= amount });
+    showToast(bill.type === 'income' ? `Amount updated for ${bill.name}` : `Budget updated for ${bill.name}`);
+  }
+
+  function runSwipeAction(action, bill) {
+    if (action === 'paidFull') {
+      if (isBillPaid(bill)) unmarkPaid(bill);
+      else markPaidFull(bill);
+    }
+    else if (action === 'paidPartial') setPartialPaymentBill(bill);
+    else if (action === 'editBudget') setEditBudgetBill(bill);
+  }
+
+  function handleExportCSV() {
+    const exportable = collapseForExport(bills);
+    downloadFile(`bills-export-${todayISO()}.csv`, billsToCSV(exportable), 'text/csv');
+    showToast('Bills exported to CSV');
+  }
+
+  function handleExportJSON() {
+    const exportable = collapseForExport(bills);
+    downloadFile(`bills-export-${todayISO()}.json`, JSON.stringify(exportable, null, 2), 'application/json');
+    showToast('Bills exported to JSON');
+  }
+
+  function handleImportFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = String(reader.result);
+        let imported = [];
+        if (file.name.endsWith('.json')) {
+          const parsed = JSON.parse(text);
+          imported = parsed.map(b => ({ ...b, id: uid() }));
+        } else {
+          imported = csvToBills(text);
+        }
+        if (imported.length === 0) {
+          showToast('No bills found in file');
+          return;
+        }
+        const expanded = expandAfterImport(imported);
+        setBills(prev => [...prev, ...expanded]);
+        showToast(`Imported ${expanded.length} bill${expanded.length === 1 ? '' : 's'}`);
+      } catch {
+        showToast('Could not read that file');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function handleGoogleDriveConnect() {
+    showToast('Connect a Google Client ID in Settings to enable Drive sync');
+  }
+
+  function handleClearAll() {
+    setBills([]);
+    showToast('All bills cleared');
+  }
+
+  const period = useMemo(() => {
+    if (settings.periodMode === 'monthly') {
+      const base = new Date();
+      base.setMonth(base.getMonth() + periodOffset);
+      const start = new Date(base.getFullYear(), base.getMonth(), 1);
+      const end = new Date(base.getFullYear(), base.getMonth() + 1, 0);
+      return { start: toISO(start), end: toISO(end), label: `${MONTH_NAMES[start.getMonth()]} ${start.getFullYear()}` };
+    } else {
+      const todayPeriod = getBiweeklyPeriod(todayISO(), settings.biweeklyAnchorDate);
+      const start = parseISO(todayPeriod.start);
+      start.setDate(start.getDate() + periodOffset * 14);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 13);
+      return {
+        start: toISO(start),
+        end: toISO(end),
+        label: `${formatDateShort(toISO(start))} – ${formatDateShort(toISO(end))}`,
+      };
+    }
+  }, [settings.periodMode, settings.biweeklyAnchorDate, periodOffset]);
+
+  const billsInPeriod = useMemo(() => {
+    return bills
+      .filter(b => b.type !== 'income' && b.dueDate >= period.start && b.dueDate <= period.end)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  }, [bills, period]);
+
+  const incomeInPeriod = useMemo(() => {
+    return bills
+      .filter(b => b.type === 'income' && b.dueDate >= period.start && b.dueDate <= period.end)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  }, [bills, period]);
+
+  // Bills that are overdue and due before this period even started — only
+  // surfaced when looking at the current period (offset 0), since "carried
+  // over" is relative to today, not to whatever period happens to be on screen.
+  const carryoverBills = useMemo(() => {
+    if (periodOffset !== 0) return [];
+    return bills
+      .filter(b => b.type !== 'income' && !isBillPaid(b) && b.dueDate < period.start && daysUntil(b.dueDate) < 0)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  }, [bills, period, periodOffset]);
+
+  const periodTotals = useMemo(() => {
+    const budgeted = billsInPeriod.reduce((s, b) => s + b.budgetAmount, 0);
+    const paid = billsInPeriod.reduce((s, b) => s + b.paidAmount, 0);
+    const remaining = budgeted - paid;
+    const overdue = billsInPeriod.filter(b => !isBillPaid(b) && daysUntil(b.dueDate) < 0).length + carryoverBills.length;
+    const incomeBudgeted = incomeInPeriod.reduce((s, b) => s + b.budgetAmount, 0);
+    const incomeReceived = incomeInPeriod.reduce((s, b) => s + b.paidAmount, 0);
+    const playMoney = incomeBudgeted - budgeted;
+    return { budgeted, paid, remaining, overdue, incomeBudgeted, incomeReceived, playMoney };
+  }, [billsInPeriod, incomeInPeriod, carryoverBills]);
+
+  return (
+    <div style={{
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      background: colors.bg, color: colors.text, minHeight: '100vh', width: '100%',
+      transition: 'background 0.2s, color 0.2s',
+    }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        input, select, textarea, button { font-family: inherit; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: ${colors.border}; border-radius: 4px; }
+        @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .toast-anim { animation: slideUp 0.2s ease-out; }
+        .modal-anim { animation: fadeIn 0.15s ease-out; }
+      `}</style>
+
+      <Header colors={colors} view={view} setView={setView} onSettings={() => setShowSettings(true)} onAdd={() => setShowAddEdit('new')} />
+      {view !== 'history' && (
+        <PeriodBar colors={colors} settings={settings} period={period} periodOffset={periodOffset} setPeriodOffset={setPeriodOffset} totals={periodTotals} />
+      )}
+
+      <main style={{ maxWidth: 720, margin: '0 auto', padding: '0 16px 100px' }}>
+        {view === 'list' && (
+          <ListView colors={colors} bills={billsInPeriod} incomeInPeriod={incomeInPeriod} carryoverBills={carryoverBills} settings={settings} onSwipe={runSwipeAction} onTap={(b) => setShowAddEdit(b)} />
+        )}
+        {view === 'calendar' && (
+          <CalendarView colors={colors} allBills={bills} period={period} onSelectBill={(b) => setShowAddEdit(b)} />
+        )}
+        {view === 'history' && (
+          <HistoryView colors={colors} allBills={bills} settings={settings} onSelectBill={(b) => setShowAddEdit(b)} />
+        )}
+      </main>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,.json"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files && e.target.files[0];
+          if (f) handleImportFile(f);
+          e.target.value = '';
+        }}
+      />
+
+      {showSettings && (
+        <SettingsModal
+          colors={colors}
+          settings={settings}
+          setSettings={setSettings}
+          onClose={() => setShowSettings(false)}
+          onExportCSV={handleExportCSV}
+          onExportJSON={handleExportJSON}
+          onImportClick={() => fileInputRef.current && fileInputRef.current.click()}
+          onGoogleDrive={handleGoogleDriveConnect}
+          onClearAll={() => setConfirmClearAll(true)}
+        />
+      )}
+
+      {showAddEdit && (
+        <BillEditModal
+          colors={colors}
+          bill={showAddEdit === 'new' ? null : showAddEdit}
+          onClose={() => setShowAddEdit(null)}
+          onSaveOccurrence={(updated) => { saveOccurrenceOnly(updated); setShowAddEdit(null); }}
+          onSaveAll={(updated, original) => { saveAllInSeries(updated, original); setShowAddEdit(null); }}
+          onSaveNew={(b) => { upsertBill(b); setShowAddEdit(null); showToast('Bill added'); }}
+          onSaveNewSeries={(template, count) => {
+            const occurrences = generateOccurrences(template, 0, count);
+            setBills(prev => [...prev, ...occurrences]);
+            setShowAddEdit(null);
+            showToast(`Bill added — ${count} occurrence${count === 1 ? '' : 's'} scheduled`);
+          }}
+          onRequestDelete={(bill, scope) => { setConfirmDelete({ bill, scope }); setShowAddEdit(null); }}
+        />
+      )}
+
+      {partialPaymentBill && (
+        <PartialPaymentModal colors={colors} bill={partialPaymentBill} onClose={() => setPartialPaymentBill(null)} onConfirm={(amt) => { applyPartialPayment(partialPaymentBill, amt); setPartialPaymentBill(null); }} />
+      )}
+
+      {editBudgetBill && (
+        <EditBudgetModal colors={colors} bill={editBudgetBill} onClose={() => setEditBudgetBill(null)} onConfirm={(amt) => { applyBudgetEdit(editBudgetBill, amt); setEditBudgetBill(null); }} />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          colors={colors}
+          title={confirmDelete.scope === 'all' ? 'Delete this and all future occurrences?' : 'Delete this occurrence?'}
+          message={confirmDelete.scope === 'all'
+            ? `"${confirmDelete.bill.name}" — this and every unpaid occurrence (past or future) will be permanently removed. Paid occurrences are kept as history.`
+            : `"${confirmDelete.bill.name}" on ${formatDateShort(confirmDelete.bill.dueDate)} will be permanently removed.`}
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            if (confirmDelete.scope === 'all') deleteAllInSeries(confirmDelete.bill);
+            else deleteOccurrenceOnly(confirmDelete.bill);
+            setConfirmDelete(null);
+          }}
+        />
+      )}
+
+      {confirmClearAll && (
+        <ConfirmModal
+          colors={colors}
+          title="Clear all bills?"
+          message="Every bill will be permanently removed from this device. This can't be undone unless you've exported a backup."
+          confirmLabel="Clear all"
+          danger
+          onCancel={() => setConfirmClearAll(false)}
+          onConfirm={() => { handleClearAll(); setConfirmClearAll(false); }}
+        />
+      )}
+
+      {toast && (
+        <div className="toast-anim" style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          background: colors.text, color: colors.bg, padding: '10px 18px',
+          borderRadius: 10, fontSize: 14, fontWeight: 500, zIndex: 200,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.2)', maxWidth: '90%', textAlign: 'center',
+        }}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+
+function PlusIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+function GearIcon(props) {
+  return (
+    <svg width={props.size || 17} height={props.size || 17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function ReceiptIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2V3z" />
+      <line x1="8" y1="7" x2="16" y2="7" />
+      <line x1="8" y1="11" x2="16" y2="11" />
+      <line x1="8" y1="15" x2="13" y2="15" />
+    </svg>
+  );
+}
+
+function ListIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
+    </svg>
+  );
+}
+
+function CalendarIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  );
+}
+
+function TableIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="3" y1="9" x2="21" y2="9" />
+      <line x1="3" y1="15" x2="21" y2="15" />
+      <line x1="12" y1="3" x2="12" y2="21" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
+function ChartPieIcon(props) {
+  return (
+    <svg width={props.size || 13} height={props.size || 13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M21.21 15.89A10 10 0 1 1 8 2.83" />
+      <path d="M22 12A10 10 0 0 0 12 2v10z" />
+    </svg>
+  );
+}
+
+function AlertCircleIcon(props) {
+  return (
+    <svg width={props.size || 14} height={props.size || 14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="8" x2="12" y2="12" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </svg>
+  );
+}
+
+function AlertTriangleIcon(props) {
+  return (
+    <svg width={props.size || 14} height={props.size || 14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
+
+function ClockIcon(props) {
+  return (
+    <svg width={props.size || 14} height={props.size || 14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
+function CheckCircleIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="currentColor" stroke="none" style={props.style}>
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm4.7 7.7l-5.4 5.4a1 1 0 0 1-1.4 0l-2.6-2.6a1 1 0 1 1 1.4-1.4l1.9 1.9 4.7-4.7a1 1 0 0 1 1.4 1.4z" />
+    </svg>
+  );
+}
+
+function ReceiptOffIcon(props) {
+  return (
+    <svg width={props.size || 36} height={props.size || 36} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2V3z" />
+      <line x1="3" y1="3" x2="21" y2="21" />
+    </svg>
+  );
+}
+
+function CheckIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CoinIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9.5a2.5 2 0 0 1 2.5-1.5c1.5 0 2.5 1 2.5 2s-1 1.5-2.5 2-2.5 1-2.5 2 1 2 2.5 2a2.5 2 0 0 0 2.5-1.5" />
+      <line x1="12" y1="6" x2="12" y2="7.5" />
+      <line x1="12" y1="16.5" x2="12" y2="18" />
+    </svg>
+  );
+}
+
+function EditIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  );
+}
+
+function UndoIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="9 14 4 9 9 4" />
+      <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+    </svg>
+  );
+}
+
+function CloseIcon(props) {
+  return (
+    <svg width={props.size || 18} height={props.size || 18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function TrashIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+function SunIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" />
+      <line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </svg>
+  );
+}
+
+function MoonIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function CloudIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.4 2.1A4 4 0 0 0 6.5 19h11z" />
+    </svg>
+  );
+}
+
+function DownloadIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function UploadIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+
+function Header({ colors, view, setView, onSettings, onAdd }) {
+  const [viewPickerOpen, setViewPickerOpen] = useState(false);
+  const VIEW_OPTIONS = [
+    { key: 'list', label: 'List', Icon: ListIcon },
+    { key: 'calendar', label: 'Calendar', Icon: CalendarIcon },
+    { key: 'history', label: 'History', Icon: TableIcon },
+  ];
+  const activeView = VIEW_OPTIONS.find(v => v.key === view) || VIEW_OPTIONS[0];
+
+  return (
+    <div style={{ position: 'sticky', top: 0, zIndex: 50, background: colors.bgElevated, borderBottom: `1px solid ${colors.border}` }}>
+      <div style={{ maxWidth: 720, margin: '0 auto', padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 8, background: colors.accent, display: 'flex', alignItems: 'center', justifyContent: 'center', color: colors.accentText, flexShrink: 0 }}>
+            <ReceiptIcon size={16} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15, minWidth: 0 }}>
+            <span style={{ fontSize: 16, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{APP_NAME}</span>
+            <span style={{ fontSize: 10.5, color: colors.textFaint, fontWeight: 500 }}>v{APP_VERSION}</span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setViewPickerOpen(o => !o)}
+              aria-label="Change view"
+              style={{
+                border: `1px solid ${colors.border}`, background: colors.bgInput, color: colors.text,
+                borderRadius: 10, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 5,
+                cursor: 'pointer', fontSize: 13, fontWeight: 500, height: 36,
+              }}
+            >
+              <activeView.Icon size={16} />
+              {activeView.label}
+              <ChevronDownIcon size={14} style={{ transform: viewPickerOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s', marginLeft: 1 }} />
+            </button>
+
+            {viewPickerOpen && (
+              <div style={{
+                position: 'absolute', top: '110%', right: 0, zIndex: 60, minWidth: 150,
+                background: colors.bgElevated, border: `1px solid ${colors.border}`, borderRadius: 12,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.18)', padding: 6,
+              }}>
+                {VIEW_OPTIONS.map(opt => (
+                  <button
+                    key={opt.key}
+                    onClick={() => { setView(opt.key); setViewPickerOpen(false); }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left',
+                      padding: '9px 10px', borderRadius: 8, border: 'none',
+                      background: view === opt.key ? colors.accent : 'transparent',
+                      color: view === opt.key ? colors.accentText : colors.text,
+                      cursor: 'pointer', fontSize: 13.5, fontWeight: view === opt.key ? 600 : 400,
+                    }}
+                  >
+                    <opt.Icon size={15} />
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <button onClick={onAdd} aria-label="Add bill" title="Add bill" style={{ border: 'none', background: colors.accent, color: colors.accentText, borderRadius: 10, width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+            <PlusIcon />
+          </button>
+
+          <button onClick={onSettings} aria-label="Settings" title="Settings" style={{ border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, borderRadius: 10, width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+            <GearIcon />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   PERIOD BAR
+   ============================================================ */
+
+function PeriodBar({ colors, settings, period, periodOffset, setPeriodOffset, totals }) {
+  const pct = totals.budgeted > 0 ? Math.min(100, Math.round((totals.paid / totals.budgeted) * 100)) : 0;
+  return (
+    <div style={{ maxWidth: 720, margin: '0 auto', padding: '16px 16px 4px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={() => setPeriodOffset(p => p - 1)} aria-label="Previous period" style={{ border: 'none', background: 'transparent', color: colors.textMuted, cursor: 'pointer', padding: 6, display: 'flex' }}>
+          <ChevronLeftIcon size={18} />
+        </button>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{period.label}</div>
+          <div style={{ fontSize: 12, color: colors.textMuted }}>
+            {settings.periodMode === 'monthly' ? 'Monthly view' : `Biweekly · ${DAY_NAMES[settings.biweeklyAnchorDay]}-anchored`}
+          </div>
+        </div>
+        <button onClick={() => setPeriodOffset(p => p + 1)} aria-label="Next period" style={{ border: 'none', background: 'transparent', color: colors.textMuted, cursor: 'pointer', padding: 6, display: 'flex' }}>
+          <ChevronRightIcon size={18} />
+        </button>
+      </div>
+
+      <div style={{
+        background: colors.bgElevated,
+        border: `1px solid ${colors.accent}`, borderRadius: 14, padding: '14px 16px', marginBottom: 8,
+        boxShadow: `inset 3px 0 0 ${colors.accent}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 10 }}>
+          <ChartPieIcon size={13} style={{ color: colors.accent }} />
+          <span style={{ fontSize: 11, fontWeight: 600, color: colors.accent, textTransform: 'uppercase', letterSpacing: 0.4 }}>Period summary</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+          <Stat label="Budgeted" value={formatMoney(totals.budgeted)} colors={colors} />
+          <Stat label="Paid" value={formatMoney(totals.paid)} colors={colors} accent="green" />
+          <Stat label="Remaining" value={formatMoney(totals.remaining)} colors={colors} accent={totals.remaining > 0 ? 'amber' : 'green'} />
+        </div>
+        <div style={{ height: 6, background: colors.borderSoft, borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: colors.green, borderRadius: 4, transition: 'width 0.3s' }} />
+        </div>
+        {totals.overdue > 0 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: colors.red, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <AlertCircleIcon size={14} />
+            {totals.overdue} overdue bill{totals.overdue === 1 ? '' : 's'}
+          </div>
+        )}
+
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${colors.borderSoft}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 11.5, color: colors.textMuted, marginBottom: 2 }}>Income this period</div>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>{formatMoney(totals.incomeBudgeted)}</div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11.5, color: colors.textMuted, marginBottom: 2 }}>Play money</div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: totals.playMoney >= 0 ? colors.green : colors.red }}>
+              {totals.playMoney < 0 ? '-' : ''}{formatMoney(Math.abs(totals.playMoney))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, colors, accent }) {
+  const color = accent === 'green' ? colors.green : accent === 'amber' ? colors.amber : colors.text;
+  return (
+    <div>
+      <div style={{ fontSize: 11.5, color: colors.textMuted, marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color }}>{value}</div>
+    </div>
+  );
+}
+
+/* ============================================================
+   LIST VIEW + SWIPEABLE ROW
+   ============================================================ */
+
+function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onSwipe, onTap }) {
+  const totalCount = bills.length + (carryoverBills ? carryoverBills.length : 0) + (incomeInPeriod ? incomeInPeriod.length : 0);
+
+  if (totalCount === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: '60px 20px', color: colors.textMuted }}>
+        <ReceiptOffIcon size={36} style={{ display: 'block', margin: '0 auto 10px' }} />
+        <div style={{ fontSize: 15 }}>No bills in this period</div>
+        <div style={{ fontSize: 13, marginTop: 4 }}>Tap Add to add one</div>
+      </div>
+    );
+  }
+
+  const overdueInPeriod = bills.filter(b => !isBillPaid(b) && daysUntil(b.dueDate) < 0);
+  const upcoming = bills.filter(b => !isBillPaid(b) && daysUntil(b.dueDate) >= 0);
+  const paid = bills.filter(b => isBillPaid(b));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18, paddingTop: 4, paddingBottom: 8 }}>
+      {incomeInPeriod && incomeInPeriod.length > 0 && (
+        <BillSection
+          title="Income"
+          Icon={CoinIcon}
+          tint={colors.green}
+          colors={colors}
+          bills={incomeInPeriod}
+          settings={settings}
+          onSwipe={onSwipe}
+          onTap={onTap}
+        />
+      )}
+      {carryoverBills && carryoverBills.length > 0 && (
+        <BillSection
+          title="Overdue (from earlier periods)"
+          Icon={AlertTriangleIcon}
+          tint={colors.red}
+          colors={colors}
+          bills={carryoverBills}
+          settings={settings}
+          onSwipe={onSwipe}
+          onTap={onTap}
+        />
+      )}
+      {overdueInPeriod.length > 0 && (
+        <BillSection
+          title="Overdue"
+          Icon={AlertCircleIcon}
+          tint={colors.red}
+          colors={colors}
+          bills={overdueInPeriod}
+          settings={settings}
+          onSwipe={onSwipe}
+          onTap={onTap}
+        />
+      )}
+      {upcoming.length > 0 && (
+        <BillSection
+          title="Upcoming"
+          Icon={ClockIcon}
+          tint={colors.amber}
+          colors={colors}
+          bills={upcoming}
+          settings={settings}
+          onSwipe={onSwipe}
+          onTap={onTap}
+        />
+      )}
+      {paid.length > 0 && (
+        <BillSection
+          title="Paid"
+          Icon={CheckCircleIcon}
+          tint={colors.green}
+          colors={colors}
+          bills={paid}
+          settings={settings}
+          onSwipe={onSwipe}
+          onTap={onTap}
+        />
+      )}
+    </div>
+  );
+}
+
+function BillSection({ title, Icon, tint, colors, bills, settings, onSwipe, onTap }) {
+  return (
+    <div style={{ border: `1px solid ${colors.borderSoft}`, borderRadius: 16, padding: '12px', background: 'transparent' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, paddingLeft: 2 }}>
+        <Icon size={14} style={{ color: tint }} />
+        <span style={{ fontSize: 12, fontWeight: 600, color: tint, textTransform: 'uppercase', letterSpacing: 0.4 }}>{title}</span>
+        <span style={{ fontSize: 11, color: colors.textFaint, fontWeight: 500 }}>· {bills.length}</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {bills.map((bill) => (
+          <SwipeableRow key={bill.id} bill={bill} colors={colors} settings={settings} onSwipe={onSwipe} onTap={onTap} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SwipeableRow({ bill, colors, settings, onSwipe, onTap }) {
+  const [dragX, setDragX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const startX = useRef(0);
+  const THRESHOLD = 76;
+
+  const leftAction = settings.swipeLeft;
+  const rightAction = settings.swipeRight;
+
+  function onPointerDown(e) {
+    startX.current = e.clientX;
+    setDragging(true);
+    e.target.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (!dragging) return;
+    let delta = e.clientX - startX.current;
+    if (delta > 0 && rightAction === 'none') delta = 0;
+    if (delta < 0 && leftAction === 'none') delta = 0;
+    delta = Math.max(-130, Math.min(130, delta));
+    setDragX(delta);
+  }
+  function onPointerUp() {
+    setDragging(false);
+    if (dragX > THRESHOLD && rightAction !== 'none') {
+      onSwipe(rightAction, bill);
+    } else if (dragX < -THRESHOLD && leftAction !== 'none') {
+      onSwipe(leftAction, bill);
+    }
+    setDragX(0);
+  }
+
+  const billPaid = isBillPaid(bill);
+  const overdue = !billPaid && daysUntil(bill.dueDate) < 0;
+  const dueSoon = !billPaid && daysUntil(bill.dueDate) >= 0 && daysUntil(bill.dueDate) <= 3;
+
+  const showRight = dragX > 8;
+  const showLeft = dragX < -8;
+
+  const isIncome = bill.type === 'income';
+
+  function actionLabel(action) {
+    if (action === 'paidFull') return billPaid ? (isIncome ? 'Not received' : 'Unpaid') : (isIncome ? 'Received' : 'Paid');
+    if (action === 'paidPartial') return isIncome ? 'Partial' : 'Partial';
+    if (action === 'editBudget') return isIncome ? 'Edit amount' : 'Edit';
+    return ACTION_SHORT_LABELS[action];
+  }
+
+  function actionIcon(action) {
+    if (action === 'paidFull' && billPaid) return UndoIcon;
+    return ACTION_ICON_COMPONENTS[action];
+  }
+
+  return (
+    <div style={{ position: 'relative', borderRadius: 14, overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: showRight ? 'flex-start' : 'flex-end' }}>
+        {showRight && rightAction !== 'none' && (() => { const RightIcon = actionIcon(rightAction); return (
+          <div style={{ background: ACTION_COLORS[rightAction], color: '#fff', display: 'flex', alignItems: 'center', gap: 6, padding: '0 18px', height: '100%', fontSize: 13, fontWeight: 600, width: Math.abs(dragX), overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            <RightIcon size={18} style={{ flexShrink: 0 }} />
+            {Math.abs(dragX) > 70 && actionLabel(rightAction)}
+          </div>
+        ); })()}
+        {showLeft && leftAction !== 'none' && (() => { const LeftIcon = actionIcon(leftAction); return (
+          <div style={{ background: ACTION_COLORS[leftAction], color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, padding: '0 18px', height: '100%', fontSize: 13, fontWeight: 600, width: Math.abs(dragX), overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            {Math.abs(dragX) > 70 && actionLabel(leftAction)}
+            <LeftIcon size={18} style={{ flexShrink: 0 }} />
+          </div>
+        ); })()}
+      </div>
+
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onClick={() => { if (Math.abs(dragX) < 4) onTap(bill); }}
+        style={{
+          position: 'relative',
+          transform: `translateX(${dragX}px)`,
+          transition: dragging ? 'none' : 'transform 0.2s ease-out',
+          background: colors.bgElevated,
+          border: `1px solid ${colors.border}`,
+          borderRadius: 14,
+          padding: '14px 16px',
+          cursor: 'pointer',
+          touchAction: 'pan-y',
+          userSelect: 'none',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bill.name}</span>
+              {billPaid && <CheckCircleIcon size={16} style={{ color: colors.green }} />}
+              {!billPaid && bill.autoPay && (
+                <span style={{
+                  fontSize: 9.5, fontWeight: 600, padding: '2px 6px', borderRadius: 5, flexShrink: 0,
+                  background: colors.blueBg, color: colors.blueText, textTransform: 'uppercase', letterSpacing: 0.3,
+                }} title={isIncome ? 'Will be marked received automatically on the pay date' : 'Will be marked paid automatically on the due date'}>
+                  Auto
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 12.5, color: colors.textMuted, marginTop: 2 }}>{bill.category}</div>
+          </div>
+          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>{formatMoney(bill.budgetAmount)}</div>
+            <div style={{ fontSize: 12, marginTop: 2, color: overdue ? colors.red : dueSoon ? colors.amber : colors.textMuted, fontWeight: overdue || dueSoon ? 600 : 400 }}>
+              {overdue ? `Overdue · ${formatDateShort(bill.dueDate)}` : formatDateShort(bill.dueDate)}
+            </div>
+          </div>
+        </div>
+
+        {!billPaid && bill.paidAmount > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ height: 4, background: colors.borderSoft, borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ height: '100%', borderRadius: 3, background: colors.blue, width: `${Math.min(100, (bill.paidAmount / bill.budgetAmount) * 100)}%` }} />
+            </div>
+            <div style={{ fontSize: 11.5, color: colors.textMuted, marginTop: 4 }}>
+              {formatMoney(bill.paidAmount)} of {formatMoney(bill.budgetAmount)} paid
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   CALENDAR VIEW
+   ============================================================ */
+
+function CalendarView({ colors, allBills, period, onSelectBill }) {
+  const [monthCursor, setMonthCursor] = useState(() => {
+    const d = parseISO(period.start);
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+
+  const year = monthCursor.getFullYear();
+  const month = monthCursor.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const startWeekday = firstDay.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const billsByDate = useMemo(() => {
+    const map = {};
+    allBills.forEach((b) => {
+      if (!map[b.dueDate]) map[b.dueDate] = [];
+      map[b.dueDate].push(b);
+    });
+    return map;
+  }, [allBills]);
+
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const today = todayISO();
+
+  return (
+    <div style={{ paddingTop: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={() => setMonthCursor(new Date(year, month - 1, 1))} aria-label="Previous month" style={{ border: 'none', background: 'transparent', color: colors.textMuted, cursor: 'pointer', padding: 6, display: 'flex' }}>
+          <ChevronLeftIcon size={16} />
+        </button>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>{MONTH_NAMES[month]} {year}</div>
+        <button onClick={() => setMonthCursor(new Date(year, month + 1, 1))} aria-label="Next month" style={{ border: 'none', background: 'transparent', color: colors.textMuted, cursor: 'pointer', padding: 6, display: 'flex' }}>
+          <ChevronRightIcon size={16} />
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 6 }}>
+        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+          <div key={i} style={{ textAlign: 'center', fontSize: 11, color: colors.textMuted, fontWeight: 600 }}>{d}</div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 4 }}>
+        {cells.map((day, i) => {
+          if (day === null) return <div key={i} />;
+          const iso = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const dayBills = billsByDate[iso] || [];
+          const isToday = iso === today;
+          const inPeriod = iso >= period.start && iso <= period.end;
+          return (
+            <div key={i} style={{
+              minHeight: 56, borderRadius: 8, padding: 4,
+              background: isToday ? colors.amberBg : colors.bgElevated,
+              border: `1px solid ${inPeriod ? colors.border : colors.borderSoft}`,
+              opacity: inPeriod ? 1 : 0.5,
+              display: 'flex', flexDirection: 'column', gap: 2,
+            }}>
+              <div style={{ fontSize: 11, color: isToday ? colors.accent : colors.textMuted, fontWeight: isToday ? 700 : 400 }}>{day}</div>
+              {dayBills.slice(0, 2).map(b => (
+                <div key={b.id} onClick={() => onSelectBill(b)} style={{
+                  fontSize: 9.5, padding: '1px 4px', borderRadius: 4, cursor: 'pointer',
+                  background: b.type === 'income' ? colors.blueBg : (isBillPaid(b) ? colors.greenBg : colors.amberBg),
+                  color: b.type === 'income' ? colors.blueText : (isBillPaid(b) ? colors.greenText : colors.amber),
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }} title={`${b.name} · ${formatMoney(b.budgetAmount)}`}>
+                  {b.name}
+                </div>
+              ))}
+              {dayBills.length > 2 && <div style={{ fontSize: 9, color: colors.textMuted }}>+{dayBills.length - 2} more</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   HISTORY VIEW (filter by bill, see all occurrences)
+   ============================================================ */
+
+function HistoryView({ colors, allBills, settings, onSelectBill }) {
+  const [selectedNames, setSelectedNames] = useState([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const distinctNames = useMemo(() => {
+    const set = new Set(allBills.map(b => b.name));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [allBills]);
+
+  function toggleName(name) {
+    setSelectedNames(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
+  }
+
+  const groups = useMemo(() => {
+    const names = selectedNames.length > 0 ? selectedNames : distinctNames;
+    return names.map(name => {
+      const occurrences = allBills
+        .filter(b => b.name === name)
+        .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+      // For forever-recurring series, trim future unpaid occurrences down to
+      // the configured cap. Past and paid occurrences are real history and
+      // are never trimmed.
+      const today = todayISO();
+      const trimmed = [];
+      let futureUnpaidShown = 0;
+      for (const occ of occurrences) {
+        const isForever = occ.seriesId && occ.endType === 'forever';
+        const isFutureUnpaid = !isBillPaid(occ) && occ.dueDate >= today;
+        if (isForever && isFutureUnpaid) {
+          if (futureUnpaidShown >= settings.maxOccurrencesShown) continue;
+          futureUnpaidShown++;
+        }
+        trimmed.push(occ);
+      }
+      return { name, occurrences: trimmed, totalCount: occurrences.length };
+    }).filter(g => g.occurrences.length > 0);
+  }, [allBills, selectedNames, distinctNames, settings.maxOccurrencesShown]);
+
+  if (distinctNames.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: '60px 20px', color: colors.textMuted }}>
+        <ReceiptOffIcon size={36} style={{ display: 'block', margin: '0 auto 10px' }} />
+        <div style={{ fontSize: 15 }}>No bills yet</div>
+        <div style={{ fontSize: 13, marginTop: 4 }}>Tap Add to add one</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ paddingTop: 4, paddingBottom: 8 }}>
+      <div style={{ position: 'relative', marginBottom: 16 }}>
+        <button
+          onClick={() => setPickerOpen(o => !o)}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '11px 14px', borderRadius: 12, border: `1px solid ${colors.border}`,
+            background: colors.bgElevated, color: colors.text, cursor: 'pointer', fontSize: 14,
+          }}
+        >
+          <span>
+            {selectedNames.length === 0
+              ? 'All bills'
+              : selectedNames.length === 1
+                ? selectedNames[0]
+                : `${selectedNames.length} bills selected`}
+          </span>
+          <ChevronDownIcon size={16} style={{ transform: pickerOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
+        </button>
+
+        {pickerOpen && (
+          <div style={{
+            position: 'absolute', top: '110%', left: 0, right: 0, zIndex: 30,
+            background: colors.bgElevated, border: `1px solid ${colors.border}`, borderRadius: 12,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.18)', maxHeight: 280, overflowY: 'auto', padding: 6,
+          }}>
+            <button
+              onClick={() => setSelectedNames([])}
+              style={{
+                width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: 'none',
+                background: selectedNames.length === 0 ? colors.amberBg : 'transparent', color: colors.text,
+                cursor: 'pointer', fontSize: 13.5, fontWeight: selectedNames.length === 0 ? 600 : 400, marginBottom: 2,
+              }}
+            >
+              All bills
+            </button>
+            {distinctNames.map(name => {
+              const checked = selectedNames.includes(name);
+              return (
+                <button
+                  key={name}
+                  onClick={() => toggleName(name)}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left',
+                    padding: '9px 10px', borderRadius: 8, border: 'none',
+                    background: checked ? colors.amberBg : 'transparent', color: colors.text,
+                    cursor: 'pointer', fontSize: 13.5,
+                  }}
+                >
+                  <span style={{
+                    width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+                    border: `1.5px solid ${checked ? colors.accent : colors.border}`,
+                    background: checked ? colors.accent : 'transparent',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    {checked && <CheckIcon size={11} style={{ color: colors.accentText }} />}
+                  </span>
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {groups.map(group => {
+          const groupIsIncome = group.occurrences[0] && group.occurrences[0].type === 'income';
+          return (
+          <div key={group.name} style={{ border: `1px solid ${colors.borderSoft}`, borderRadius: 14, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: colors.bgElevated, borderBottom: `1px solid ${colors.borderSoft}` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{group.name}</span>
+                <span style={{
+                  fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 5, textTransform: 'uppercase', letterSpacing: 0.3,
+                  background: groupIsIncome ? colors.blueBg : colors.amberBg,
+                  color: groupIsIncome ? colors.blueText : colors.amber,
+                }}>
+                  {groupIsIncome ? 'Income' : 'Bill'}
+                </span>
+              </div>
+              <span style={{ fontSize: 11.5, color: colors.textFaint }}>
+                {group.occurrences.length}{group.totalCount > group.occurrences.length ? ` of ${group.totalCount}` : ''} shown
+              </span>
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+              <thead>
+                <tr>
+                  <th style={{ width: '40%', textAlign: 'left', padding: '8px 14px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>{groupIsIncome ? 'Pay date' : 'Due date'}</th>
+                  <th style={{ width: '30%', textAlign: 'right', padding: '8px 14px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Amount</th>
+                  <th style={{ width: '30%', textAlign: 'right', padding: '8px 14px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.occurrences.map((occ, idx) => {
+                  const paidStatus = isBillPaid(occ);
+                  const overdue = !paidStatus && daysUntil(occ.dueDate) < 0;
+                  const statusLabel = paidStatus ? (groupIsIncome ? 'Received' : 'Paid') : overdue ? (groupIsIncome ? 'Not received' : 'Overdue') : 'Upcoming';
+                  return (
+                    <tr
+                      key={occ.id}
+                      onClick={() => onSelectBill(occ)}
+                      style={{ cursor: 'pointer', borderTop: idx === 0 ? 'none' : `1px solid ${colors.borderSoft}` }}
+                    >
+                      <td style={{ padding: '9px 14px', fontSize: 13 }}>{formatDateWithYear(occ.dueDate)}</td>
+                      <td style={{ padding: '9px 14px', fontSize: 13, textAlign: 'right' }}>{formatMoney(occ.budgetAmount)}</td>
+                      <td style={{ padding: '9px 14px', fontSize: 12, textAlign: 'right', fontWeight: 500, color: paidStatus ? colors.green : overdue ? colors.red : colors.amber }}>
+                        {statusLabel}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   MODAL SHELL + SHARED STYLES
+   ============================================================ */
+
+function ModalShell({ colors, onClose, children, title }) {
+  return (
+    <div className="modal-anim" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 100, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: colors.bgElevated, width: '100%', maxWidth: 480, borderRadius: '20px 20px 0 0', padding: '20px 20px 28px', maxHeight: '88vh', overflowY: 'auto', border: `1px solid ${colors.border}`, borderBottom: 'none' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ fontSize: 17, fontWeight: 600 }}>{title}</div>
+          <button onClick={onClose} aria-label="Close" style={{ border: 'none', background: colors.borderSoft, color: colors.text, width: 30, height: 30, borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <CloseIcon size={16} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function FieldLabel({ colors, children }) {
+  return <label style={{ display: 'block', fontSize: 12.5, color: colors.textMuted, marginBottom: 6, fontWeight: 500 }}>{children}</label>;
+}
+
+function inputStyle(colors) {
+  return { width: '100%', padding: '10px 12px', borderRadius: 10, border: `1px solid ${colors.border}`, background: colors.bgInput, color: colors.text, fontSize: 15, outline: 'none' };
+}
+
+function primaryButtonStyle(colors) {
+  return { width: '100%', padding: '13px', borderRadius: 12, border: 'none', background: colors.accent, color: colors.accentText, fontSize: 15, fontWeight: 600, cursor: 'pointer' };
+}
+
+function secondaryButtonStyle(colors) {
+  return { width: '100%', padding: '13px', borderRadius: 12, border: `1px solid ${colors.border}`, background: 'transparent', color: colors.text, fontSize: 15, fontWeight: 500, cursor: 'pointer' };
+}
+
+/* ============================================================
+   ADD / EDIT BILL MODAL
+   ============================================================ */
+
+function BillEditModal({ colors, bill, onClose, onSaveOccurrence, onSaveAll, onSaveNew, onSaveNewSeries, onRequestDelete }) {
+  const isEditingExisting = !!bill;
+  const isPartOfSeries = !!(bill && bill.seriesId);
+
+  const [type, setType] = useState(bill ? (bill.type || 'bill') : 'bill');
+  const isIncome = type === 'income';
+  const categoryOptions = isIncome ? INCOME_CATEGORIES : DEFAULT_CATEGORIES;
+
+  const [name, setName] = useState(bill ? bill.name : '');
+  const [category, setCategory] = useState(bill ? bill.category : DEFAULT_CATEGORIES[0]);
+  const [budgetAmount, setBudgetAmount] = useState(bill ? String(bill.budgetAmount) : '');
+  const [dueDate, setDueDate] = useState(bill ? bill.dueDate : todayISO());
+  const [recurring, setRecurring] = useState(bill ? !!bill.seriesId : false);
+  const [notes, setNotes] = useState(bill ? bill.notes : '');
+  const [paidAmount, setPaidAmount] = useState(bill ? String(bill.paidAmount) : '0');
+  const [autoPay, setAutoPay] = useState(bill ? !!bill.autoPay : false);
+  const [frequency, setFrequency] = useState(bill && bill.frequency ? bill.frequency : 'monthly');
+  const [endType, setEndType] = useState(bill && bill.endType ? bill.endType : 'forever');
+  const [occurrenceLimit, setOccurrenceLimit] = useState(bill && bill.occurrenceLimit ? String(bill.occurrenceLimit) : '12');
+
+  const newBudgetNum = parseFloat(budgetAmount) || 0;
+  const newPaidNum = parseFloat(paidAmount) || 0;
+  const willBePaid = newBudgetNum > 0 && newPaidNum >= newBudgetNum;
+  const occurrenceLimitNum = Math.max(1, parseInt(occurrenceLimit) || 1);
+
+  function handleTypeChange(newType) {
+    setType(newType);
+    // Switching type resets category to a sensible default for that type,
+    // since bill and income categories are different lists.
+    if (!isEditingExisting) {
+      setCategory(newType === 'income' ? INCOME_CATEGORIES[0] : DEFAULT_CATEGORIES[0]);
+    }
+  }
+
+  function buildOccurrenceFields() {
+    return {
+      type,
+      name: name.trim(),
+      category,
+      budgetAmount: newBudgetNum,
+      paidAmount: newPaidNum,
+      dueDate,
+      isPaid: willBePaid,
+      notes,
+      autoPay,
+    };
+  }
+
+  function handleSaveNew() {
+    if (!name.trim() || !budgetAmount) return;
+    if (recurring) {
+      const template = {
+        type,
+        seriesId: uid(),
+        name: name.trim(),
+        category,
+        budgetAmount: newBudgetNum,
+        notes,
+        frequency,
+        seriesStartDate: dueDate,
+        endType,
+        occurrenceLimit: endType === 'count' ? occurrenceLimitNum : null,
+        autoPay,
+      };
+      const totalAllowed = endType === 'forever' ? FOREVER_GENERATION_WINDOW : Math.min(occurrenceLimitNum, FOREVER_GENERATION_WINDOW);
+      onSaveNewSeries(template, totalAllowed);
+    } else {
+      onSaveNew({ id: uid(), ...buildOccurrenceFields(), recurring: false, seriesId: null, occurrenceIndex: null, frequency: null, seriesStartDate: null, endType: null, occurrenceLimit: null });
+    }
+  }
+
+  function handleSaveOccurrence() {
+    if (!name.trim() || !budgetAmount) return;
+    onSaveOccurrence({ id: bill.id, ...buildOccurrenceFields() });
+  }
+
+  function handleSaveAll() {
+    if (!name.trim() || !budgetAmount) return;
+    const updated = {
+      ...buildOccurrenceFields(),
+      frequency,
+      seriesStartDate: bill.seriesStartDate || dueDate,
+      endType,
+      occurrenceLimit: endType === 'count' ? occurrenceLimitNum : null,
+    };
+    onSaveAll(updated, bill);
+  }
+
+  const showSeriesFields = recurring && (!isEditingExisting || isPartOfSeries);
+
+  return (
+    <ModalShell colors={colors} onClose={onClose} title={isEditingExisting ? (isIncome ? 'Edit income' : 'Edit bill') : (isIncome ? 'Add income' : 'Add bill')}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {!isEditingExisting && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[{ key: 'bill', label: 'Bill' }, { key: 'income', label: 'Income' }].map(t => (
+              <button
+                type="button"
+                key={t.key}
+                onClick={() => handleTypeChange(t.key)}
+                style={{
+                  flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer',
+                  border: `1px solid ${type === t.key ? colors.accent : colors.border}`,
+                  background: type === t.key ? colors.accent : 'transparent',
+                  color: type === t.key ? colors.accentText : colors.text,
+                  fontSize: 14, fontWeight: 500,
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div>
+          <FieldLabel colors={colors}>{isIncome ? 'Income name' : 'Bill name'}</FieldLabel>
+          <input style={inputStyle(colors)} value={name} onChange={e => setName(e.target.value)} placeholder={isIncome ? 'e.g. Paycheck' : 'e.g. Rent'} />
+        </div>
+        <div>
+          <FieldLabel colors={colors}>Category</FieldLabel>
+          <select style={inputStyle(colors)} value={category} onChange={e => setCategory(e.target.value)}>
+            {categoryOptions.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <FieldLabel colors={colors}>{isIncome ? 'Amount' : 'Budget amount'}</FieldLabel>
+            <input style={inputStyle(colors)} type="number" step="0.01" value={budgetAmount} onChange={e => setBudgetAmount(e.target.value)} placeholder="0.00" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <FieldLabel colors={colors}>{isIncome ? 'Pay date' : 'Due date'}</FieldLabel>
+            <input style={inputStyle(colors)} type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <FieldLabel colors={colors}>Notes (optional)</FieldLabel>
+          <input style={inputStyle(colors)} value={notes} onChange={e => setNotes(e.target.value)} placeholder={isIncome ? 'Employer, account, etc.' : 'Account number, etc.'} />
+        </div>
+        {isEditingExisting && (
+          <div>
+            <FieldLabel colors={colors}>{isIncome ? 'Amount received so far' : 'Amount paid so far'}</FieldLabel>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input style={{ ...inputStyle(colors), flex: 1 }} type="number" step="0.01" value={paidAmount} onChange={e => setPaidAmount(e.target.value)} placeholder="0.00" />
+              <button
+                type="button"
+                onClick={() => setPaidAmount(budgetAmount || '0')}
+                style={{ ...secondaryButtonStyle(colors), width: 'auto', padding: '10px 12px', fontSize: 13, whiteSpace: 'nowrap' }}
+              >
+                Mark full
+              </button>
+            </div>
+            <div style={{ fontSize: 12, marginTop: 6, color: willBePaid ? colors.green : colors.textMuted, fontWeight: 500 }}>
+              {isIncome
+                ? (willBePaid ? 'Received in full — counted toward this period\u2019s income' : `${formatMoney(Math.max(0, newBudgetNum - newPaidNum))} not yet received`)
+                : (willBePaid ? 'Paid in full — will show in the Paid section' : `${formatMoney(Math.max(0, newBudgetNum - newPaidNum))} remaining — will show as upcoming or overdue`)}
+            </div>
+          </div>
+        )}
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: colors.text, cursor: 'pointer' }}>
+          <input type="checkbox" checked={autoPay} onChange={e => setAutoPay(e.target.checked)} />
+          {isIncome ? 'Auto-receive on pay date' : 'Auto-pay on due date'}
+          <span style={{ fontSize: 11.5, color: colors.textFaint }}>{isIncome ? '(marks received in full automatically)' : '(marks paid in full automatically)'}</span>
+        </label>
+
+        {!isPartOfSeries && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: colors.text, cursor: isEditingExisting ? 'default' : 'pointer', opacity: isEditingExisting ? 0.6 : 1 }}>
+            <input type="checkbox" checked={recurring} disabled={isEditingExisting} onChange={e => setRecurring(e.target.checked)} />
+            {isIncome ? 'Recurring income' : 'Recurring bill'}
+            {isEditingExisting && <span style={{ fontSize: 11.5, color: colors.textFaint }}>(set when first created)</span>}
+          </label>
+        )}
+        {isPartOfSeries && (
+          <div style={{ fontSize: 12.5, color: colors.textMuted, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <ClockIcon size={13} />
+            Part of a recurring series — choose how to save below
+          </div>
+        )}
+
+        {showSeriesFields && (
+          <div style={{ border: `1px solid ${colors.borderSoft}`, borderRadius: 12, padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <FieldLabel colors={colors}>Frequency</FieldLabel>
+              <select style={inputStyle(colors)} value={frequency} onChange={e => setFrequency(e.target.value)}>
+                {FREQUENCIES.map(f => <option key={f} value={f}>{FREQUENCY_LABELS[f]}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel colors={colors}>Repeats</FieldLabel>
+              <div style={{ display: 'flex', gap: 8, marginBottom: endType === 'count' ? 10 : 0 }}>
+                {['forever', 'count'].map(t => (
+                  <button
+                    type="button"
+                    key={t}
+                    onClick={() => setEndType(t)}
+                    style={{
+                      flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer',
+                      border: `1px solid ${endType === t ? colors.accent : colors.border}`,
+                      background: endType === t ? colors.accent : 'transparent',
+                      color: endType === t ? colors.accentText : colors.text,
+                      fontSize: 13, fontWeight: 500,
+                    }}
+                  >
+                    {t === 'forever' ? 'Forever' : 'Set number of times'}
+                  </button>
+                ))}
+              </div>
+              {endType === 'count' && (
+                <div>
+                  <input
+                    style={inputStyle(colors)}
+                    type="number"
+                    min="1"
+                    value={occurrenceLimit}
+                    onChange={e => setOccurrenceLimit(e.target.value)}
+                    placeholder="e.g. 6"
+                  />
+                  <div style={{ fontSize: 11.5, color: colors.textFaint, marginTop: 6 }}>
+                    Occurs {occurrenceLimitNum} time{occurrenceLimitNum === 1 ? '' : 's'} total, {FREQUENCY_LABELS[frequency].toLowerCase()}, starting {formatDateShort(dueDate)}.
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!isEditingExisting && (
+          <button style={primaryButtonStyle(colors)} onClick={handleSaveNew}>Add bill</button>
+        )}
+
+        {isEditingExisting && !isPartOfSeries && (
+          <>
+            <button style={primaryButtonStyle(colors)} onClick={handleSaveOccurrence}>Save changes</button>
+            {onRequestDelete && (
+              <button style={{ ...secondaryButtonStyle(colors), color: colors.red, borderColor: colors.red, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => onRequestDelete(bill, 'occurrence')}>
+                <TrashIcon size={15} />
+                Delete bill
+              </button>
+            )}
+          </>
+        )}
+
+        {isEditingExisting && isPartOfSeries && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...primaryButtonStyle(colors), flex: 1, fontSize: 13.5 }} onClick={handleSaveOccurrence}>
+                Save this occurrence
+              </button>
+              <button style={{ ...primaryButtonStyle(colors), flex: 1, fontSize: 13.5 }} onClick={handleSaveAll}>
+                Save this &amp; future
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: colors.textFaint, lineHeight: 1.4, padding: '0 2px' }}>
+              "This occurrence" only changes the bill on {formatDateShort(bill.dueDate)}. "This &amp; future" updates every unpaid occurrence, past or future — paid ones are kept as history.
+            </div>
+            {onRequestDelete && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                <button style={{ ...secondaryButtonStyle(colors), flex: 1, color: colors.red, borderColor: colors.red, fontSize: 13.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => onRequestDelete(bill, 'occurrence')}>
+                  <TrashIcon size={14} />
+                  Delete occurrence
+                </button>
+                <button style={{ ...secondaryButtonStyle(colors), flex: 1, color: colors.red, borderColor: colors.red, fontSize: 13.5, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => onRequestDelete(bill, 'all')}>
+                  <TrashIcon size={14} />
+                  Delete all
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ============================================================
+   PARTIAL PAYMENT MODAL
+   ============================================================ */
+
+function PartialPaymentModal({ colors, bill, onClose, onConfirm }) {
+  const isIncome = bill.type === 'income';
+  const remaining = bill.budgetAmount - bill.paidAmount;
+  const [amount, setAmount] = useState(remaining > 0 ? String(remaining.toFixed(2)) : '');
+
+  return (
+    <ModalShell colors={colors} onClose={onClose} title={isIncome ? `Log received \u00b7 ${bill.name}` : `Log payment \u00b7 ${bill.name}`}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13, color: colors.textMuted }}>
+          {isIncome
+            ? `${formatMoney(bill.paidAmount)} already received of ${formatMoney(bill.budgetAmount)} expected. Remaining: ${formatMoney(Math.max(0, remaining))}`
+            : `${formatMoney(bill.paidAmount)} already paid of ${formatMoney(bill.budgetAmount)} budgeted. Remaining: ${formatMoney(Math.max(0, remaining))}`}
+        </div>
+        <div>
+          <FieldLabel colors={colors}>{isIncome ? 'Amount received now' : 'Amount paid now'}</FieldLabel>
+          <input style={inputStyle(colors)} type="number" step="0.01" autoFocus value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" />
+        </div>
+        <button style={primaryButtonStyle(colors)} onClick={() => { const n = parseFloat(amount); if (!isNaN(n) && n > 0) onConfirm(n); }}>{isIncome ? 'Log received' : 'Log payment'}</button>
+        <button style={secondaryButtonStyle(colors)} onClick={onClose}>Cancel</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ============================================================
+   EDIT BUDGET MODAL
+   ============================================================ */
+
+function EditBudgetModal({ colors, bill, onClose, onConfirm }) {
+  const isIncome = bill.type === 'income';
+  const [amount, setAmount] = useState(String(bill.budgetAmount));
+  return (
+    <ModalShell colors={colors} onClose={onClose} title={isIncome ? `Edit amount \u00b7 ${bill.name}` : `Edit budget \u00b7 ${bill.name}`}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div>
+          <FieldLabel colors={colors}>{isIncome ? 'New amount' : 'New budget amount'}</FieldLabel>
+          <input style={inputStyle(colors)} type="number" step="0.01" autoFocus value={amount} onChange={e => setAmount(e.target.value)} />
+        </div>
+        <button style={primaryButtonStyle(colors)} onClick={() => { const n = parseFloat(amount); if (!isNaN(n) && n >= 0) onConfirm(n); }}>{isIncome ? 'Save amount' : 'Save budget'}</button>
+        <button style={secondaryButtonStyle(colors)} onClick={onClose}>Cancel</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ============================================================
+   CONFIRM MODAL
+   ============================================================ */
+
+function ConfirmModal({ colors, title, message, confirmLabel, danger, onCancel, onConfirm }) {
+  return (
+    <ModalShell colors={colors} onClose={onCancel} title={title}>
+      <div style={{ fontSize: 14, color: colors.textMuted, marginBottom: 18 }}>{message}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <button style={{ ...primaryButtonStyle(colors), background: danger ? colors.red : colors.accent, color: '#fff' }} onClick={onConfirm}>{confirmLabel}</button>
+        <button style={secondaryButtonStyle(colors)} onClick={onCancel}>Cancel</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+/* ============================================================
+   SETTINGS MODAL
+   ============================================================ */
+
+function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, onExportJSON, onImportClick, onGoogleDrive, onClearAll }) {
+  function update(patch) {
+    setSettings(s => ({ ...s, ...patch }));
+  }
+
+  return (
+    <ModalShell colors={colors} onClose={onClose} title="Settings">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+
+        <Section colors={colors} title="Appearance">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['light', 'dark'].map(t => (
+              <button key={t} onClick={() => update({ theme: t })} style={{
+                flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer',
+                border: `1px solid ${settings.theme === t ? colors.accent : colors.border}`,
+                background: settings.theme === t ? colors.accent : 'transparent',
+                color: settings.theme === t ? colors.accentText : colors.text,
+                fontSize: 14, fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}>
+                {t === 'light' ? <SunIcon size={15} /> : <MoonIcon size={15} />}
+                {t === 'light' ? 'Light' : 'Dark'}
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section colors={colors} title="Budget period">
+          <div style={{ display: 'flex', gap: 8, marginBottom: settings.periodMode === 'biweekly' ? 12 : 0 }}>
+            {['monthly', 'biweekly'].map(p => (
+              <button key={p} onClick={() => update({ periodMode: p })} style={{
+                flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer',
+                border: `1px solid ${settings.periodMode === p ? colors.accent : colors.border}`,
+                background: settings.periodMode === p ? colors.accent : 'transparent',
+                color: settings.periodMode === p ? colors.accentText : colors.text,
+                fontSize: 14, fontWeight: 500,
+              }}>
+                {p === 'monthly' ? 'Monthly' : 'Biweekly'}
+              </button>
+            ))}
+          </div>
+          {settings.periodMode === 'biweekly' && (
+            <div>
+              <FieldLabel colors={colors}>Pay day (period starts on this weekday)</FieldLabel>
+              <select style={inputStyle(colors)} value={settings.biweeklyAnchorDay} onChange={e => {
+                const day = parseInt(e.target.value);
+                update({ biweeklyAnchorDay: day, biweeklyAnchorDate: nextAnchorOnOrAfter(todayISO(), day) });
+              }}>
+                {DAY_NAMES.map((d, i) => <option key={i} value={i}>{d}</option>)}
+              </select>
+              <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 6 }}>
+                Each period runs {DAY_NAMES[settings.biweeklyAnchorDay]} through the {DAY_NAMES[(settings.biweeklyAnchorDay + 6) % 7]} two weeks later.
+              </div>
+            </div>
+          )}
+        </Section>
+
+        <Section colors={colors} title="Bill history view">
+          <FieldLabel colors={colors}>Max occurrences shown per bill (forever-recurring bills)</FieldLabel>
+          <input
+            style={inputStyle(colors)}
+            type="number"
+            min="1"
+            max="20"
+            value={settings.maxOccurrencesShown}
+            onChange={e => {
+              const n = Math.max(1, Math.min(20, parseInt(e.target.value) || 1));
+              update({ maxOccurrencesShown: n });
+            }}
+          />
+          <div style={{ fontSize: 11.5, color: colors.textFaint, marginTop: 6 }}>
+            Caps how many upcoming occurrences show per bill in the bill history view. Max 20.
+          </div>
+        </Section>
+
+        <Section colors={colors} title="Swipe actions">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <FieldLabel colors={colors}>Swipe right</FieldLabel>
+              <select style={inputStyle(colors)} value={settings.swipeRight} onChange={e => update({ swipeRight: e.target.value })}>
+                {Object.entries(ACTION_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel colors={colors}>Swipe left</FieldLabel>
+              <select style={inputStyle(colors)} value={settings.swipeLeft} onChange={e => update({ swipeLeft: e.target.value })}>
+                {Object.entries(ACTION_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+          </div>
+        </Section>
+
+        <Section colors={colors} title="Data">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button style={{ ...secondaryButtonStyle(colors), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={onGoogleDrive}>
+              <CloudIcon size={15} />
+              Connect Google Drive
+            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button style={{ ...secondaryButtonStyle(colors), flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={onExportCSV}>
+                <DownloadIcon size={15} />
+                Export CSV
+              </button>
+              <button style={{ ...secondaryButtonStyle(colors), flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={onExportJSON}>
+                <DownloadIcon size={15} />
+                Export JSON
+              </button>
+            </div>
+            <button style={{ ...secondaryButtonStyle(colors), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={onImportClick}>
+              <UploadIcon size={15} />
+              Import from file
+            </button>
+            <div style={{ fontSize: 11.5, color: colors.textFaint, lineHeight: 1.5 }}>
+              Import accepts the same CSV or JSON format produced by export, so a fresh phone or browser can be restored in one tap. Bills and income are both included. "Forever" recurring entries export as their history plus one marker row, then regenerate their upcoming occurrences automatically on import — so the file never balloons with endless future rows.
+            </div>
+          </div>
+        </Section>
+
+        <Section colors={colors} title="Reset">
+          <button style={{ ...secondaryButtonStyle(colors), color: colors.red, borderColor: colors.red, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={onClearAll}>
+            <TrashIcon size={15} />
+            Clear all bills
+          </button>
+          <div style={{ fontSize: 11.5, color: colors.textFaint, lineHeight: 1.5, marginTop: 8 }}>
+            Removes every bill, including the starter examples. Export first if you want a backup.
+          </div>
+        </Section>
+      </div>
+    </ModalShell>
+  );
+}
+
+function Section({ colors, title, children }) {
+  return (
+    <div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: colors.textMuted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.3 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+
+<script>
+  // Manually transpile and run the app source, forcing the classic JSX
+  // runtime explicitly (rather than relying on a default that differs
+  // between Babel versions) and surfacing any error visibly instead of
+  // a silent blank screen.
+  try {
+    const source = document.getElementById('app-source').textContent;
+    const { code } = Babel.transform(source, {
+      presets: [['react', { runtime: 'classic' }]],
+    });
+    (0, eval)(code);
+  } catch (err) {
+    const el = document.getElementById('boot-error');
+    el.style.display = 'block';
+    el.textContent = 'I Got Bills failed to start.\n\n' + (err && err.message ? err.message : String(err));
+    console.error(err);
+  }
+</script>
+
+<script>
+  // Register a minimal service worker so the app can be added to the home
+  // screen as an installable PWA and keep working offline once loaded.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
