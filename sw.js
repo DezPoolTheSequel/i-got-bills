@@ -2,7 +2,7 @@
 // loaded, and serves the cached version if the network is unavailable.
 // Bump CACHE_NAME whenever you want returning users to pick up a fresh copy
 // of these core files (the JS framework CDNs are cached on first load too).
-const CACHE_NAME = 'i-got-bills-v26.06.21.1';
+const CACHE_NAME = 'i-got-bills-v26.06.21.2';
 const CORE_FILES = ['./', './index.html', './manifest.json'];
 
 self.addEventListener('install', (event) => {
@@ -22,6 +22,15 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  const url = event.request.url;
+
+  // Never intercept calls to a sync backend (any non-same-origin request,
+  // which covers Tailscale/NAS addresses) — those must go straight to the
+  // network untouched, never cached, and never wrapped by this worker.
+  if (!url.startsWith(self.location.origin)) {
+    return;
+  }
+
   // Network-first for navigation requests so updates are picked up promptly;
   // fall back to cache if offline.
   if (event.request.mode === 'navigate') {
