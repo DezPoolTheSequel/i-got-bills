@@ -43,14 +43,18 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.10.17.3';
+const APP_VERSION = '26.10.17.4';
+
+// Set to true by demo.html before this script runs. Controls storage keys,
+// hides sync/push sections, shows the demo banner.
+const DEMO_MODE = !!window.__DEMO_MODE__;
 
 /* ============================================================
    CONSTANTS / HELPERS
    ============================================================ */
 
-const STORAGE_KEY = 'billsTrackerData_v3';
-const SETTINGS_KEY = 'billsTrackerSettings_v3';
+const STORAGE_KEY = DEMO_MODE ? 'billsTrackerDemoData_v1' : 'billsTrackerData_v3';
+const SETTINGS_KEY = DEMO_MODE ? 'billsTrackerDemoSettings_v1' : 'billsTrackerSettings_v3';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -928,6 +932,7 @@ function App() {
         .modal-anim { animation: fadeIn 0.15s ease-out; }
       `}</style>
 
+      {DEMO_MODE && <DemoBanner colors={colors} />}
       <Header colors={colors} view={view} setView={setView} onSettings={() => setShowSettings(true)} onAdd={() => setShowAddEdit('new')} syncStatus={syncStatus} />
       {view !== 'history' && (
         <PeriodBar colors={colors} settings={settings} period={period} periodOffset={periodOffset} setPeriodOffset={setPeriodOffset} totals={periodTotals} />
@@ -1317,6 +1322,22 @@ function UploadIcon(props) {
       <polyline points="17 8 12 3 7 8" />
       <line x1="12" y1="3" x2="12" y2="15" />
     </svg>
+  );
+}
+
+function DemoBanner({ colors }) {
+  return (
+    <div style={{
+      background: colors.accent,
+      color: colors.accentText,
+      textAlign: 'center',
+      padding: '8px 16px',
+      fontSize: 13,
+      fontWeight: 600,
+      letterSpacing: 0.1,
+    }}>
+      Demo Mode — your data is local only
+    </div>
   );
 }
 
@@ -2784,9 +2805,9 @@ function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, on
     <ModalShell colors={colors} onClose={onClose} title="Settings">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
 
-        <SyncSection colors={colors} settings={settings} update={update} syncStatus={syncStatus} syncError={syncError} />
+        {!DEMO_MODE && <SyncSection colors={colors} settings={settings} update={update} syncStatus={syncStatus} syncError={syncError} />}
 
-        <NotificationsSection colors={colors} settings={settings} update={update} />
+        {!DEMO_MODE && <NotificationsSection colors={colors} settings={settings} update={update} />}
 
         <Section colors={colors} title="Appearance">
           <div style={{ display: 'flex', gap: 8 }}>

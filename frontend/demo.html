@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#BA7517" />
+<title>I Got Bills — Demo</title>
+
+<!-- Must be set before the app source runs so DEMO_MODE = true -->
+<script>window.__DEMO_MODE__ = true;</script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #FAF8F2; }
+  #root { min-height: 100vh; }
+  #boot-error { display: none; max-width: 600px; margin: 60px auto; padding: 20px; font-family: -apple-system, sans-serif; color: #A32D2D; white-space: pre-wrap; }
+</style>
+
+<!-- React + ReactDOM (same versions as index.html) -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+
+<script>
+  // Fetch the app source from index.html and transpile it here with DEMO_MODE
+  // already set. This keeps demo.html thin — the UI never diverges from the
+  // owner build; only the DEMO_MODE flag changes behavior.
+  fetch('./index.html')
+    .then(function(r) { return r.text(); })
+    .then(function(html) {
+      var m = html.match(/<script[^>]+id="app-source"[^>]*>([\s\S]*?)<\/script>/);
+      if (!m) {
+        var el = document.getElementById('boot-error');
+        el.style.display = 'block';
+        el.textContent = 'Demo failed to load — could not find app source in index.html.';
+        return;
+      }
+      try {
+        var result = Babel.transform(m[1], {
+          presets: [['react', { runtime: 'classic' }]],
+        });
+        (0, eval)(result.code);
+      } catch (err) {
+        var el = document.getElementById('boot-error');
+        el.style.display = 'block';
+        el.textContent = 'I Got Bills Demo failed to start.\n\n' + (err && err.message ? err.message : String(err));
+        console.error(err);
+      }
+    })
+    .catch(function(err) {
+      var el = document.getElementById('boot-error');
+      el.style.display = 'block';
+      el.textContent = 'Demo failed to load index.html.\n\n' + (err && err.message ? err.message : String(err));
+    });
+</script>
+</body>
+</html>
