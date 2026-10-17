@@ -43,7 +43,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.06.21.3';
+const APP_VERSION = '26.10.17.1';
 
 /* ============================================================
    CONSTANTS / HELPERS
@@ -584,6 +584,7 @@ function App() {
   const [toast, setToast] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null); // { bill, scope: 'occurrence' | 'all' }
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [historyPopupBill, setHistoryPopupBill] = useState(null);
   const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | synced | error | offline
   const [syncError, setSyncError] = useState('');
   const fileInputRef = useRef(null);
@@ -932,7 +933,7 @@ function App() {
 
       <main style={{ maxWidth: 720, margin: '0 auto', padding: '0 16px 100px' }}>
         {view === 'list' && (
-          <ListView colors={colors} bills={billsInPeriod} incomeInPeriod={incomeInPeriod} carryoverBills={carryoverBills} settings={settings} onSwipe={runSwipeAction} onTap={(b) => setShowAddEdit(b)} />
+          <ListView colors={colors} bills={billsInPeriod} incomeInPeriod={incomeInPeriod} carryoverBills={carryoverBills} settings={settings} onSwipe={runSwipeAction} onTap={(b) => setShowAddEdit(b)} onLongPress={(b) => setHistoryPopupBill(b)} />
         )}
         {view === 'calendar' && (
           <CalendarView colors={colors} allBills={bills} period={period} onSelectBill={(b) => setShowAddEdit(b)} />
@@ -994,6 +995,17 @@ function App() {
 
       {editBudgetBill && (
         <EditBudgetModal colors={colors} bill={editBudgetBill} onClose={() => setEditBudgetBill(null)} onConfirm={(amt) => { applyBudgetEdit(editBudgetBill, amt); setEditBudgetBill(null); }} />
+      )}
+
+      {historyPopupBill && (
+        <BillHistoryModal
+          colors={colors}
+          bill={historyPopupBill}
+          allBills={bills}
+          settings={settings}
+          onClose={() => setHistoryPopupBill(null)}
+          onSelectBill={(b) => { setHistoryPopupBill(null); setShowAddEdit(b); }}
+        />
       )}
 
       {confirmDelete && (
@@ -1459,7 +1471,7 @@ function Stat({ label, value, colors, accent }) {
    LIST VIEW + SWIPEABLE ROW
    ============================================================ */
 
-function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onSwipe, onTap }) {
+function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onSwipe, onTap, onLongPress }) {
   const totalCount = bills.length + (carryoverBills ? carryoverBills.length : 0) + (incomeInPeriod ? incomeInPeriod.length : 0);
 
   if (totalCount === 0) {
@@ -1496,6 +1508,7 @@ function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onS
           settings={settings}
           onSwipe={onSwipe}
           onTap={onTap}
+          onLongPress={onLongPress}
         />
       )}
       {carryoverBills && carryoverBills.length > 0 && (
@@ -1508,6 +1521,7 @@ function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onS
           settings={settings}
           onSwipe={onSwipe}
           onTap={onTap}
+          onLongPress={onLongPress}
         />
       )}
       {overdueInPeriod.length > 0 && (
@@ -1520,6 +1534,7 @@ function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onS
           settings={settings}
           onSwipe={onSwipe}
           onTap={onTap}
+          onLongPress={onLongPress}
         />
       )}
       {upcoming.length > 0 && (
@@ -1532,6 +1547,7 @@ function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onS
           settings={settings}
           onSwipe={onSwipe}
           onTap={onTap}
+          onLongPress={onLongPress}
         />
       )}
       {paid.length > 0 && (
@@ -1544,13 +1560,14 @@ function ListView({ colors, bills, incomeInPeriod, carryoverBills, settings, onS
           settings={settings}
           onSwipe={onSwipe}
           onTap={onTap}
+          onLongPress={onLongPress}
         />
       )}
     </div>
   );
 }
 
-function BillSection({ title, Icon, tint, colors, bills, settings, onSwipe, onTap }) {
+function BillSection({ title, Icon, tint, colors, bills, settings, onSwipe, onTap, onLongPress }) {
   return (
     <div style={{ border: `1px solid ${colors.borderSoft}`, borderRadius: 16, padding: '12px', background: 'transparent' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, paddingLeft: 2 }}>
@@ -1560,17 +1577,19 @@ function BillSection({ title, Icon, tint, colors, bills, settings, onSwipe, onTa
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {bills.map((bill) => (
-          <SwipeableRow key={bill.id} bill={bill} colors={colors} settings={settings} onSwipe={onSwipe} onTap={onTap} />
+          <SwipeableRow key={bill.id} bill={bill} colors={colors} settings={settings} onSwipe={onSwipe} onTap={onTap} onLongPress={onLongPress} />
         ))}
       </div>
     </div>
   );
 }
 
-function SwipeableRow({ bill, colors, settings, onSwipe, onTap }) {
+function SwipeableRow({ bill, colors, settings, onSwipe, onTap, onLongPress }) {
   const [dragX, setDragX] = useState(0);
   const [dragging, setDragging] = useState(false);
   const startX = useRef(0);
+  const longPressTimer = useRef(null);
+  const longPressTriggered = useRef(false);
   const THRESHOLD = 76;
 
   const leftAction = settings.swipeLeft;
@@ -1580,17 +1599,33 @@ function SwipeableRow({ bill, colors, settings, onSwipe, onTap }) {
     startX.current = e.clientX;
     setDragging(true);
     e.target.setPointerCapture(e.pointerId);
+    longPressTriggered.current = false;
+    if (onLongPress) {
+      longPressTimer.current = setTimeout(() => {
+        longPressTriggered.current = true;
+        setDragging(false);
+        setDragX(0);
+        if (navigator.vibrate) navigator.vibrate(50);
+        onLongPress(bill);
+      }, 500);
+    }
   }
   function onPointerMove(e) {
     if (!dragging) return;
     let delta = e.clientX - startX.current;
+    if (Math.abs(delta) > 8) clearTimeout(longPressTimer.current);
     if (delta > 0 && rightAction === 'none') delta = 0;
     if (delta < 0 && leftAction === 'none') delta = 0;
     delta = Math.max(-130, Math.min(130, delta));
     setDragX(delta);
   }
   function onPointerUp() {
+    clearTimeout(longPressTimer.current);
     setDragging(false);
+    if (longPressTriggered.current) {
+      setDragX(0);
+      return;
+    }
     if (dragX > THRESHOLD && rightAction !== 'none') {
       onSwipe(rightAction, bill);
     } else if (dragX < -THRESHOLD && leftAction !== 'none') {
@@ -1642,7 +1677,8 @@ function SwipeableRow({ bill, colors, settings, onSwipe, onTap }) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        onClick={() => { if (Math.abs(dragX) < 4) onTap(bill); }}
+        onContextMenu={(e) => e.preventDefault()}
+        onClick={() => { if (Math.abs(dragX) < 4 && !longPressTriggered.current) onTap(bill); }}
         style={{
           position: 'relative',
           transform: `translateX(${dragX}px)`,
@@ -2036,6 +2072,91 @@ function HistoryView({ colors, allBills, settings, onSelectBill }) {
         })}
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   BILL HISTORY POPUP (long-press on list view row)
+   ============================================================ */
+
+function BillHistoryModal({ colors, bill, allBills, settings, onClose, onSelectBill }) {
+  const isIncome = bill.type === 'income';
+
+  const occurrences = useMemo(() => {
+    const all = allBills
+      .filter(b => b.name === bill.name)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    const today = todayISO();
+    const result = [];
+    let futureUnpaidShown = 0;
+    for (const occ of all) {
+      const isForever = occ.seriesId && occ.endType === 'forever';
+      const isFutureUnpaid = !isBillPaid(occ) && occ.dueDate >= today;
+      if (isForever && isFutureUnpaid) {
+        if (futureUnpaidShown >= settings.maxOccurrencesShown) continue;
+        futureUnpaidShown++;
+      }
+      result.push(occ);
+    }
+    return result;
+  }, [allBills, bill.name, settings.maxOccurrencesShown]);
+
+  const totalPaid = occurrences.filter(o => isBillPaid(o)).reduce((s, o) => s + o.paidAmount, 0);
+
+  return (
+    <ModalShell colors={colors} onClose={onClose} title={bill.name}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 5, textTransform: 'uppercase', letterSpacing: 0.3, background: isIncome ? colors.blueBg : colors.amberBg, color: isIncome ? colors.blueText : colors.amber }}>
+          {isIncome ? 'Income' : 'Bill'}
+        </span>
+        <span style={{ fontSize: 10, fontWeight: 500, padding: '2px 7px', borderRadius: 5, background: colors.borderSoft, color: colors.textMuted }}>
+          {bill.category}
+        </span>
+        {bill.recurring && bill.frequency && (
+          <span style={{ fontSize: 10, fontWeight: 500, padding: '2px 7px', borderRadius: 5, background: colors.borderSoft, color: colors.textMuted }}>
+            {FREQUENCY_LABELS[bill.frequency]}
+          </span>
+        )}
+      </div>
+
+      <div style={{ border: `1px solid ${colors.borderSoft}`, borderRadius: 12, overflow: 'hidden', marginBottom: 14 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <thead>
+            <tr style={{ background: colors.bg }}>
+              <th style={{ width: '40%', textAlign: 'left', padding: '8px 12px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>{isIncome ? 'Pay date' : 'Due date'}</th>
+              <th style={{ width: '30%', textAlign: 'right', padding: '8px 12px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Amount</th>
+              <th style={{ width: '30%', textAlign: 'right', padding: '8px 12px', fontSize: 11, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {occurrences.map((occ, idx) => {
+              const paid = isBillPaid(occ);
+              const overdue = !paid && daysUntil(occ.dueDate) < 0;
+              const statusLabel = paid ? (isIncome ? 'Received' : 'Paid') : overdue ? (isIncome ? 'Not received' : 'Overdue') : 'Upcoming';
+              return (
+                <tr
+                  key={occ.id}
+                  onClick={() => onSelectBill(occ)}
+                  style={{ cursor: 'pointer', borderTop: idx === 0 ? 'none' : `1px solid ${colors.borderSoft}` }}
+                >
+                  <td style={{ padding: '9px 12px', fontSize: 13 }}>{formatDateWithYear(occ.dueDate)}</td>
+                  <td style={{ padding: '9px 12px', fontSize: 13, textAlign: 'right' }}>{formatMoney(occ.budgetAmount)}</td>
+                  <td style={{ padding: '9px 12px', fontSize: 12, textAlign: 'right', fontWeight: 500, color: paid ? colors.green : overdue ? colors.red : colors.amber }}>
+                    {statusLabel}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPaid > 0 && (
+        <div style={{ fontSize: 13, color: colors.textMuted, textAlign: 'right' }}>
+          Total {isIncome ? 'received' : 'paid'}: <span style={{ color: colors.green, fontWeight: 600 }}>{formatMoney(totalPaid)}</span>
+        </div>
+      )}
+    </ModalShell>
   );
 }
 

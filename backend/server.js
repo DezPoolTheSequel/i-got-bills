@@ -22,18 +22,22 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 // Allow generous JSON payloads (bill history can grow) but not unbounded.
 app.use(express.json({ limit: '5mb' }));
 
-// Basic CORS: the app may be opened from different origins (GitHub Pages,
-// localhost during testing, etc.), so reflect the request origin rather
-// than hardcoding one. The x-app-key requirement is the real access control,
-// not CORS — CORS here is just about which browsers will allow the calls.
+// CORS: now that the backend is exposed via Tailscale Funnel (public internet),
+// restrict allowed origins rather than reflecting any origin. The x-app-key
+// requirement is the real access control — CORS here limits which browser
+// origins can make requests at all.
 //
-// Access-Control-Allow-Private-Network is required separately: modern
-// Chrome blocks public sites (like this app, served from GitHub Pages)
-// from reaching private-network addresses (like this NAS, even via a
-// Tailscale *.ts.net hostname) unless the server explicitly opts in with
-// this header on the preflight response.
+// Access-Control-Allow-Private-Network is kept for compatibility in case the
+// backend is temporarily switched back to Tailscale Serve (private tailnet).
+const ALLOWED_ORIGINS = new Set([
+  'https://dezpoolthesequel.github.io',
+]);
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  const origin = req.headers.origin;
+  const isLocalhost = origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  const isAllowed = !origin || ALLOWED_ORIGINS.has(origin) || isLocalhost;
+  res.header('Access-Control-Allow-Origin', isAllowed ? (origin || '*') : '');
   res.header('Access-Control-Allow-Methods', 'GET, PUT, POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, x-app-key');
   res.header('Access-Control-Allow-Private-Network', 'true');

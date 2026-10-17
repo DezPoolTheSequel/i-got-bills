@@ -48,41 +48,45 @@ backend/    Node/Express API, runs in Docker on a home Synology NAS
 
 ## Networking model (important context, not in any code file)
 
-- The backend is NOT exposed to the public internet. It's reachable only via
-  **Tailscale** (a private WireGuard mesh VPN) — phone, PC, and NAS are all on the
-  same private tailnet.
-- The backend's public-facing address is an HTTPS Tailscale Serve proxy:
-  `https://soast2.tail3a8b73.ts.net` → forwards to `127.0.0.1:3001` on the NAS.
-  This was set up with `sudo tailscale serve --bg 3001`, run on the NAS over SSH,
-  and is re-applied automatically on boot via a DSM Task Scheduler job
-  ("Tailscale Serve - I Got Bills", triggered on Boot-up, runs as root).
+- The backend is exposed to the **public internet** via **Tailscale Funnel** — a
+  WireGuard mesh VPN with a public relay. No Tailscale client is required on the
+  accessing device (phone, PC, etc.), so the app works away from home without a VPN.
+- The backend's address is `https://soast2.tail3a8b73.ts.net` → proxied by Tailscale
+  Funnel to `127.0.0.1:3001` on the NAS. This was set up with
+  `sudo tailscale funnel --bg 3001`, run on the NAS over SSH. The NAS node must have
+  Funnel enabled in the Tailscale admin console (tailscale.com → Machines → NAS →
+  Funnel). The config is re-applied automatically on boot via a DSM Task Scheduler
+  job ("Tailscale Serve - I Got Bills", triggered on Boot-up, runs as root, command:
+  `tailscale funnel --bg 3001`).
 - HTTPS on the backend is NOT optional. The frontend is served over HTTPS
   (GitHub Pages), and browsers block a secure page from calling an insecure
   (`http://`) backend address — this bit us once already (mixed content / mixed
   origin failures). Always use the `https://*.ts.net` address, never the raw
   `http://100.x.x.x:3001` Tailscale IP, when configuring sync in the app.
+- CORS in `server.js` is restricted to the GitHub Pages origin
+  (`https://dezpoolthesequel.github.io`) and localhost. The APP_KEY is the real
+  access gate — CORS just prevents arbitrary browser-origin requests since the
+  backend is now public. If you add another frontend origin, update `ALLOWED_ORIGINS`
+  in `server.js`.
 
 ## Known gotchas (hard-won, don't re-debug these)
 
-1. **CORS Private Network Access header.** Chrome (and other Chromium browsers)
-   block a public-origin page (GitHub Pages) from fetching a private-network
-   address (the NAS, even via its `*.ts.net` hostname) unless the server responds
-   with `Access-Control-Allow-Private-Network: true`. This header is already set
-   in `server.js`'s CORS middleware — if sync calls start failing with
-   "Failed to fetch" / CORS errors again, check this header is still present
-   first, before assuming it's a networking problem.
-2. **Chrome's site-level "Local network" permission.** Separate from the header
-   above — Chrome also has a per-site permission (chrome://settings → Privacy →
-   Site Settings → Local network, sometimes called "Apps on device") that can be
-   stuck on "Ask" without ever surfacing the actual prompt, especially when the
-   request goes through a service worker. If sync fails on a *specific* device/
-   browser after the header is confirmed correct, check this permission is set
-   to Allow for the site, or fully clear site data to force a fresh permission
-   negotiation.
-3. **Service workers and Private Network Access.** A service worker sitting in
-   front of a fetch() call to a private-network address can interfere with that
-   permission negotiation. This is why `sw.js` explicitly excludes cross-origin
-   requests from interception (see Frontend section above).
+1. **CORS origin restriction (Funnel era).** Since the backend is now on the public
+   internet, `server.js` restricts `Access-Control-Allow-Origin` to a known allowlist
+   (`ALLOWED_ORIGINS`). If you add a new frontend origin (e.g., a demo subdomain),
+   update that set or requests from the new origin will get a blank CORS header and
+   fail in browser. `Access-Control-Allow-Private-Network: true` is kept in the header
+   set as a no-op — harmless, and avoids having to re-add it if ever switched back to
+   Serve.
+2. **Chrome's site-level "Local network" permission (historical, Serve era).** When
+   the backend was on the private tailnet, Chrome required a per-site "Local network"
+   permission (chrome://settings → Privacy → Site Settings → Local network). With
+   Funnel this is no longer a private-network address and this permission is not needed.
+   Kept here in case we ever revert.
+3. **Service workers and Private Network Access (historical, Serve era).** A service
+   worker in front of a private-network fetch() could interfere with permission
+   negotiation. `sw.js` still excludes cross-origin requests from interception — keep
+   that behavior regardless, as it's the correct pattern for any sync architecture.
 4. **Docker build-time DNS on this Synology model.** `npm install` during the
    Docker image build can fail with `EAI_AGAIN` (DNS resolution failure) even
    though the NAS itself has working internet. Fixed by adding
@@ -95,6 +99,27 @@ backend/    Node/Express API, runs in Docker on a home Synology NAS
    doesn't appear on the installed app, try: clear the site's storage/cache for
    the GitHub Pages origin, or bump `CACHE_NAME` in `sw.js` to force the old
    cache to be invalidated.
+
+## Build variants (owner build vs. demo build)
+
+There are two intended builds of this app, sharing the same frontend codebase:
+
+**Owner build** (current)
+- Frontend on GitHub Pages + backend on Synology NAS (via Tailscale Funnel).
+- Data is synced server-side in JSON files; all devices share the same state.
+- Requires the APP_KEY and the backend to be reachable.
+
+**Demo build** (planned — not yet implemented)
+- Frontend only — no backend needed.
+- All data stored in browser **IndexedDB** (localStorage is too small for bill history
+  with recurring series).
+- No APP_KEY, no sync, fully self-contained in the browser.
+- Goal: anyone can try a live version of the app without running their own backend.
+- Implementation plan: a storage-layer abstraction in `index.html` that checks a flag
+  (e.g., `?demo=1` URL param or a separate `demo.html`) and routes all reads/writes
+  to IndexedDB instead of the backend API. The rest of the UI is identical.
+- When building the demo mode, don't duplicate the UI — parameterize the storage layer
+  only. The demo and owner builds should share one HTML file if possible.
 
 ## Data model conventions
 
