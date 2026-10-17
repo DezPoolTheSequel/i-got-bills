@@ -43,7 +43,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.10.17.2';
+const APP_VERSION = '26.10.17.3';
 
 /* ============================================================
    CONSTANTS / HELPERS
@@ -313,6 +313,8 @@ function loadSettings() {
     maxOccurrencesShown: 12,
     syncUrl: '',
     syncKey: '',
+    notifyDayBefore: true,
+    notifyDayOf: false,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -2558,7 +2560,7 @@ function urlBase64ToUint8Array(base64String) {
   return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
 }
 
-function NotificationsSection({ colors, settings }) {
+function NotificationsSection({ colors, settings, update }) {
   const [status, setStatus] = useState('checking');
   const [errorMsg, setErrorMsg] = useState('');
   const [working, setWorking] = useState(false);
@@ -2644,9 +2646,24 @@ function NotificationsSection({ colors, settings }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, border: `1px solid ${colors.border}`, background: colors.bgInput }}>
             <BellIcon size={16} style={{ color: colors.green, flexShrink: 0 }} />
             <div>
-              <div style={{ fontSize: 13, fontWeight: 500 }}>Notifications enabled</div>
-              <div style={{ fontSize: 11.5, color: colors.textMuted }}>Day-before reminder · 4:30 AM</div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>Notifications enabled · 4:30 AM</div>
+              <div style={{ fontSize: 11.5, color: colors.textMuted }}>
+                {settings.notifyDayBefore && settings.notifyDayOf ? 'Day-before & day-of reminders'
+                  : settings.notifyDayBefore ? 'Day-before reminder'
+                  : settings.notifyDayOf ? 'Day-of reminder'
+                  : 'No reminders selected'}
+              </div>
             </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '2px 0' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: colors.text, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!settings.notifyDayBefore} onChange={e => update({ notifyDayBefore: e.target.checked })} />
+              Day before due
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: colors.text, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!settings.notifyDayOf} onChange={e => update({ notifyDayOf: e.target.checked })} />
+              Day of due
+            </label>
           </div>
           {errorMsg && <div style={{ fontSize: 12, color: colors.red }}>{errorMsg}</div>}
           <button style={{ ...secondaryButtonStyle(colors), color: colors.red, borderColor: colors.red }} onClick={handleDisable} disabled={working}>
@@ -2769,7 +2786,7 @@ function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, on
 
         <SyncSection colors={colors} settings={settings} update={update} syncStatus={syncStatus} syncError={syncError} />
 
-        <NotificationsSection colors={colors} settings={settings} />
+        <NotificationsSection colors={colors} settings={settings} update={update} />
 
         <Section colors={colors} title="Appearance">
           <div style={{ display: 'flex', gap: 8 }}>

@@ -164,38 +164,56 @@ app.delete('/api/push/unsubscribe', (req, res) => {
 });
 
 // Daily check at 4:30 AM (uses TZ env var for the container's timezone).
-async function sendDueTomorrowNotifications() {
+async function sendNotifications() {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
-  const tomorrow = getTomorrowISO();
-  const bills = readJsonFile(BILLS_FILE, []);
-  const due = bills.filter(b => b.type !== 'income' && b.dueDate === tomorrow && !isBillPaid(b));
-  if (due.length === 0) return;
-
   const subs = readJsonFile(SUBSCRIPTIONS_FILE, []);
   if (subs.length === 0) return;
 
-  const title = due.length === 1
-    ? `Bill due tomorrow: ${due[0].name}`
-    : `${due.length} bills due tomorrow`;
-  const body = due.length === 1
-    ? formatMoney(due[0].budgetAmount)
-    : due.map(b => `${b.name} (${formatMoney(b.budgetAmount)})`).join(', ');
+  const settings = readJsonFile(SETTINGS_FILE, {});
+  const notifyDayBefore = settings.notifyDayBefore !== false; // default true
+  const notifyDayOf = settings.notifyDayOf === true;           // default false
 
-  const results = await Promise.allSettled(
-    subs.map(sub => webpush.sendNotification(sub, JSON.stringify({ title, body })))
-  );
+  const bills = readJsonFile(BILLS_FILE, []);
+  const today = new Date().toISOString().split('T')[0];
+  const tomorrow = getTomorrowISO();
 
-  // Clean up subscriptions that the push service says are gone (410 = unsubscribed).
-  const validSubs = subs.filter((_, i) => {
-    const r = results[i];
-    return r.status === 'fulfilled' || (r.reason && r.reason.statusCode !== 410);
-  });
-  if (validSubs.length !== subs.length) writeJsonFile(SUBSCRIPTIONS_FILE, validSubs);
+  const toSend = [];
 
-  console.log(`Push: notified ${subs.length} device(s) about ${due.length} bill(s) due tomorrow`);
+  if (notifyDayBefore) {
+    const due = bills.filter(b => b.type !== 'income' && b.dueDate === tomorrow && !isBillPaid(b));
+    if (due.length > 0) toSend.push({
+      title: due.length === 1 ? `Bill due tomorrow: ${due[0].name}` : `${due.length} bills due tomorrow`,
+      body: due.length === 1 ? formatMoney(due[0].budgetAmount) : due.map(b => `${b.name} (${formatMoney(b.budgetAmount)})`).join(', '),
+    });
+  }
+
+  if (notifyDayOf) {
+    const due = bills.filter(b => b.type !== 'income' && b.dueDate === today && !isBillPaid(b));
+    if (due.length > 0) toSend.push({
+      title: due.length === 1 ? `Bill due today: ${due[0].name}` : `${due.length} bills due today`,
+      body: due.length === 1 ? formatMoney(due[0].budgetAmount) : due.map(b => `${b.name} (${formatMoney(b.budgetAmount)})`).join(', '),
+    });
+  }
+
+  if (toSend.length === 0) return;
+
+  let currentSubs = subs;
+  for (const notif of toSend) {
+    const results = await Promise.allSettled(
+      currentSubs.map(sub => webpush.sendNotification(sub, JSON.stringify(notif)))
+    );
+    // Clean up subscriptions the push service says are gone (410 = browser unsubscribed).
+    currentSubs = currentSubs.filter((_, i) => {
+      const r = results[i];
+      return r.status === 'fulfilled' || (r.reason && r.reason.statusCode !== 410);
+    });
+  }
+  if (currentSubs.length !== subs.length) writeJsonFile(SUBSCRIPTIONS_FILE, currentSubs);
+
+  console.log(`Push: sent ${toSend.length} notification(s) to ${subs.length} device(s)`);
 }
 
-cron.schedule('30 4 * * *', sendDueTomorrowNotifications);
+cron.schedule('30 4 * * *', sendNotifications);
 
 app.listen(PORT, () => {
   ensureDataDir();
