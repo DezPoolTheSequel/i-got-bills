@@ -49,7 +49,7 @@ app.use((req, res, next) => {
   const isLocalhost = origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   const isAllowed = !origin || ALLOWED_ORIGINS.has(origin) || isLocalhost;
   res.header('Access-Control-Allow-Origin', isAllowed ? (origin || '*') : '');
-  res.header('Access-Control-Allow-Methods', 'GET, PUT, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, PUT, POST, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, x-app-key');
   res.header('Access-Control-Allow-Private-Network', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
