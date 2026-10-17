@@ -2,7 +2,7 @@
 // loaded, and serves the cached version if the network is unavailable.
 // Bump CACHE_NAME whenever you want returning users to pick up a fresh copy
 // of these core files (the JS framework CDNs are cached on first load too).
-const CACHE_NAME = 'i-got-bills-v26.06.21.2';
+const CACHE_NAME = 'i-got-bills-v26.10.17.2';
 const CORE_FILES = ['./', './index.html', './manifest.json'];
 
 self.addEventListener('install', (event) => {
@@ -19,6 +19,30 @@ self.addEventListener('activate', (event) => {
     )
   );
   self.clients.claim();
+});
+
+self.addEventListener('push', (event) => {
+  const data = event.data ? event.data.json() : {};
+  const title = data.title || 'I Got Bills';
+  const options = {
+    body: data.body || '',
+    icon: './icon-192.png',
+    badge: './icon-192.png',
+    data: { url: self.location.origin },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if (client.url.startsWith(self.location.origin) && 'focus' in client) return client.focus();
+      }
+      if (clients.openWindow) return clients.openWindow(event.notification.data.url || '/');
+    })
+  );
 });
 
 self.addEventListener('fetch', (event) => {

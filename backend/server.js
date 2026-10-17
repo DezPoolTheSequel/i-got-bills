@@ -10,6 +10,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const webpush = require('web-push');
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -18,6 +20,15 @@ const DATA_DIR = process.env.DATA_DIR || '/data';
 
 const BILLS_FILE = path.join(DATA_DIR, 'bills.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
+
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:noreply@example.com';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 // Allow generous JSON payloads (bill history can grow) but not unbounded.
 app.use(express.json({ limit: '5mb' }));
@@ -79,6 +90,20 @@ function readJsonFile(filePath, fallback) {
   }
 }
 
+function isBillPaid(bill) {
+  return bill.budgetAmount > 0 && bill.paidAmount >= bill.budgetAmount;
+}
+
+function getTomorrowISO() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return d.toISOString().split('T')[0];
+}
+
+function formatMoney(n) {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(n) || 0);
+}
+
 function writeJsonFile(filePath, data) {
   ensureDataDir();
   // Write to a temp file then rename, so a crash mid-write can't corrupt
@@ -113,6 +138,64 @@ app.put('/api/settings', (req, res) => {
   writeJsonFile(SETTINGS_FILE, req.body);
   res.json({ status: 'saved' });
 });
+
+// Push notification endpoints — require auth like all other /api routes.
+
+app.get('/api/push/vapid-key', (req, res) => {
+  if (!VAPID_PUBLIC_KEY) return res.status(503).json({ error: 'Push notifications not configured on this server.' });
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+app.post('/api/push/subscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint) return res.status(400).json({ error: 'Invalid subscription object.' });
+  const subs = readJsonFile(SUBSCRIPTIONS_FILE, []);
+  const filtered = subs.filter(s => s.endpoint !== sub.endpoint);
+  writeJsonFile(SUBSCRIPTIONS_FILE, [...filtered, sub]);
+  res.json({ status: 'subscribed' });
+});
+
+app.delete('/api/push/unsubscribe', (req, res) => {
+  const { endpoint } = req.body || {};
+  if (!endpoint) return res.status(400).json({ error: 'No endpoint provided.' });
+  const subs = readJsonFile(SUBSCRIPTIONS_FILE, []);
+  writeJsonFile(SUBSCRIPTIONS_FILE, subs.filter(s => s.endpoint !== endpoint));
+  res.json({ status: 'unsubscribed' });
+});
+
+// Daily check at 4:30 AM (uses TZ env var for the container's timezone).
+async function sendDueTomorrowNotifications() {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  const tomorrow = getTomorrowISO();
+  const bills = readJsonFile(BILLS_FILE, []);
+  const due = bills.filter(b => b.type !== 'income' && b.dueDate === tomorrow && !isBillPaid(b));
+  if (due.length === 0) return;
+
+  const subs = readJsonFile(SUBSCRIPTIONS_FILE, []);
+  if (subs.length === 0) return;
+
+  const title = due.length === 1
+    ? `Bill due tomorrow: ${due[0].name}`
+    : `${due.length} bills due tomorrow`;
+  const body = due.length === 1
+    ? formatMoney(due[0].budgetAmount)
+    : due.map(b => `${b.name} (${formatMoney(b.budgetAmount)})`).join(', ');
+
+  const results = await Promise.allSettled(
+    subs.map(sub => webpush.sendNotification(sub, JSON.stringify({ title, body })))
+  );
+
+  // Clean up subscriptions that the push service says are gone (410 = unsubscribed).
+  const validSubs = subs.filter((_, i) => {
+    const r = results[i];
+    return r.status === 'fulfilled' || (r.reason && r.reason.statusCode !== 410);
+  });
+  if (validSubs.length !== subs.length) writeJsonFile(SUBSCRIPTIONS_FILE, validSubs);
+
+  console.log(`Push: notified ${subs.length} device(s) about ${due.length} bill(s) due tomorrow`);
+}
+
+cron.schedule('30 4 * * *', sendDueTomorrowNotifications);
 
 app.listen(PORT, () => {
   ensureDataDir();

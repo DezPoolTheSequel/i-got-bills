@@ -43,7 +43,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 // whenever the date changes, incremented whenever this file is republished
 // again on the same day.
 const APP_NAME = 'I Got Bills';
-const APP_VERSION = '26.10.17.1';
+const APP_VERSION = '26.10.17.2';
 
 /* ============================================================
    CONSTANTS / HELPERS
@@ -1277,6 +1277,15 @@ function MoonIcon(props) {
   return (
     <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
       <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function BellIcon(props) {
+  return (
+    <svg width={props.size || 16} height={props.size || 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={props.style}>
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
     </svg>
   );
 }
@@ -2542,6 +2551,113 @@ function ConfirmModal({ colors, title, message, confirmLabel, danger, onCancel, 
    SETTINGS MODAL
    ============================================================ */
 
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+function NotificationsSection({ colors, settings }) {
+  const [status, setStatus] = useState('checking');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [working, setWorking] = useState(false);
+
+  const isConfigured = syncConfigured(settings);
+
+  useEffect(() => {
+    if (!isConfigured) { setStatus('no-sync'); return; }
+    if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setStatus('unsupported'); return;
+    }
+    if (Notification.permission === 'denied') { setStatus('denied'); return; }
+    navigator.serviceWorker.ready
+      .then(sw => sw.pushManager.getSubscription())
+      .then(sub => setStatus(sub ? 'subscribed' : 'unsubscribed'))
+      .catch(() => setStatus('unsubscribed'));
+  }, [isConfigured]);
+
+  async function handleEnable() {
+    setWorking(true); setErrorMsg('');
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') { setStatus('denied'); return; }
+      const { publicKey } = await syncFetch(settings, '/api/push/vapid-key', { method: 'GET' });
+      const sw = await navigator.serviceWorker.ready;
+      const sub = await sw.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+      await syncFetch(settings, '/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub.toJSON()) });
+      setStatus('subscribed');
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to enable notifications');
+      setStatus('unsubscribed');
+    } finally { setWorking(false); }
+  }
+
+  async function handleDisable() {
+    setWorking(true); setErrorMsg('');
+    try {
+      const sw = await navigator.serviceWorker.ready;
+      const sub = await sw.pushManager.getSubscription();
+      if (sub) {
+        await syncFetch(settings, '/api/push/unsubscribe', { method: 'DELETE', body: JSON.stringify({ endpoint: sub.endpoint }) });
+        await sub.unsubscribe();
+      }
+      setStatus('unsubscribed');
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to disable notifications');
+    } finally { setWorking(false); }
+  }
+
+  return (
+    <Section colors={colors} title="Push notifications">
+      {status === 'no-sync' && (
+        <div style={{ fontSize: 12.5, color: colors.textFaint, lineHeight: 1.5 }}>
+          Connect your sync server first — push notifications are sent from the backend.
+        </div>
+      )}
+      {status === 'unsupported' && (
+        <div style={{ fontSize: 12.5, color: colors.textFaint, lineHeight: 1.5 }}>
+          Push notifications are not supported in this browser.
+        </div>
+      )}
+      {status === 'denied' && (
+        <div style={{ fontSize: 12.5, color: colors.red, lineHeight: 1.5 }}>
+          Notification permission was denied. Allow notifications for this site in your browser or system settings, then try again.
+        </div>
+      )}
+      {status === 'checking' && (
+        <div style={{ fontSize: 12.5, color: colors.textFaint }}>Checking…</div>
+      )}
+      {(status === 'unsubscribed') && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 12.5, color: colors.textFaint, lineHeight: 1.5 }}>
+            Get a push notification the day before any bill is due. Sent at 4:30 AM from your backend.
+          </div>
+          {errorMsg && <div style={{ fontSize: 12, color: colors.red }}>{errorMsg}</div>}
+          <button style={primaryButtonStyle(colors)} onClick={handleEnable} disabled={working}>
+            {working ? 'Enabling…' : 'Enable notifications'}
+          </button>
+        </div>
+      )}
+      {status === 'subscribed' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, border: `1px solid ${colors.border}`, background: colors.bgInput }}>
+            <BellIcon size={16} style={{ color: colors.green, flexShrink: 0 }} />
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>Notifications enabled</div>
+              <div style={{ fontSize: 11.5, color: colors.textMuted }}>Day-before reminder · 4:30 AM</div>
+            </div>
+          </div>
+          {errorMsg && <div style={{ fontSize: 12, color: colors.red }}>{errorMsg}</div>}
+          <button style={{ ...secondaryButtonStyle(colors), color: colors.red, borderColor: colors.red }} onClick={handleDisable} disabled={working}>
+            {working ? 'Disabling…' : 'Disable notifications'}
+          </button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function SyncSection({ colors, settings, update, syncStatus, syncError }) {
   const [urlDraft, setUrlDraft] = useState(settings.syncUrl);
   const [keyDraft, setKeyDraft] = useState(settings.syncKey);
@@ -2652,6 +2768,8 @@ function SettingsModal({ colors, settings, setSettings, onClose, onExportCSV, on
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
 
         <SyncSection colors={colors} settings={settings} update={update} syncStatus={syncStatus} syncError={syncError} />
+
+        <NotificationsSection colors={colors} settings={settings} />
 
         <Section colors={colors} title="Appearance">
           <div style={{ display: 'flex', gap: 8 }}>
